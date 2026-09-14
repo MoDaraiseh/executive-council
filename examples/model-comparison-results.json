@@ -1,0 +1,470 @@
+[
+  {
+    "model": "haiku",
+    "example": "01-clear-approve",
+    "run": 1,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "approve_with_conditions",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "approve_with_conditions",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "approve_with_conditions"
+  },
+  {
+    "model": "haiku",
+    "example": "01-clear-approve",
+    "run": 2,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "approve_with_conditions",
+        "confidence": "medium",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "approve_with_conditions"
+  },
+  {
+    "model": "haiku",
+    "example": "02-compliance-red-flag",
+    "run": 1,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "reject"
+  },
+  {
+    "model": "haiku",
+    "example": "02-compliance-red-flag",
+    "run": 2,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "reject"
+  },
+  {
+    "model": "haiku",
+    "example": "03-no-context",
+    "run": 1,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "low",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "low",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "insufficient_data"
+  },
+  {
+    "model": "haiku",
+    "example": "03-no-context",
+    "run": 2,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "insufficient_data"
+  },
+  {
+    "model": "sonnet",
+    "example": "01-clear-approve",
+    "run": 1,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "approve_with_conditions",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "approve_with_conditions"
+  },
+  {
+    "model": "sonnet",
+    "example": "01-clear-approve",
+    "run": 2,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "approve",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "approve"
+  },
+  {
+    "model": "sonnet",
+    "example": "02-compliance-red-flag",
+    "run": 1,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "reject"
+  },
+  {
+    "model": "sonnet",
+    "example": "02-compliance-red-flag",
+    "run": 2,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "approve_with_conditions",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "reject",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "reject"
+  },
+  {
+    "model": "sonnet",
+    "example": "03-no-context",
+    "run": 1,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "low",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "low",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "insufficient_data"
+  },
+  {
+    "model": "sonnet",
+    "example": "03-no-context",
+    "run": 2,
+    "agents": {
+      "cfo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "coo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cmo-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "high",
+        "valid": true,
+        "errors": []
+      },
+      "cto-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "low",
+        "valid": true,
+        "errors": []
+      },
+      "chro-agent": {
+        "recommendation": "insufficient_data",
+        "confidence": "low",
+        "valid": true,
+        "errors": []
+      }
+    },
+    "all_subagent_schema_valid": true,
+    "final_decision": "insufficient_data"
+  }
+]

@@ -1,0 +1,79 @@
+﻿Staging context/ from: C:\Users\darai_qtguapt\Documents\executive-council\context
+Backing up current context/ before making any changes...
+
+Running 01-clear-approve x3...
+
+Running 02-compliance-red-flag x3...
+
+Running 03-no-context x3...
+
+Restoring original context/ contents...
+
+Raw transcripts written to: C:\Users\darai_qtguapt\Documents\executive-council\examples\.results\20260914-110424
+
+# /council validation report
+
+Generated: 2026-09-14T08:20:39.304672+00:00
+
+## 01-clear-approve
+
+Expected final_decision in: ['approve']
+
+| run | (a) 5 calls | (a) 5 distinct roles | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |
+|---|---|---|---|---|---|---|---|
+| 1 | FAIL | FAIL | PASS | FAIL | FAIL | approve_with_conditions | FAIL |
+  - note (run 1): expected 5 subagent invocations, got 0 ([])
+  - note (run 1): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+  - note (run 1): final_decision 'approve_with_conditions' not in acceptable set ['approve']
+| 2 | FAIL | FAIL | PASS | FAIL | FAIL | approve_with_conditions | FAIL |
+  - note (run 2): expected 5 subagent invocations, got 0 ([])
+  - note (run 2): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+  - note (run 2): final_decision 'approve_with_conditions' not in acceptable set ['approve']
+| 3 | FAIL | FAIL | PASS | FAIL | FAIL | approve_with_conditions | FAIL |
+  - note (run 3): expected 5 subagent invocations, got 0 ([])
+  - note (run 3): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+  - note (run 3): final_decision 'approve_with_conditions' not in acceptable set ['approve']
+
+**Agreement across 3 runs:** {'approve_with_conditions': 3} (100% agreed on the most common outcome); 0/3 runs fully passed all checks.
+
+## 02-compliance-red-flag
+
+Expected final_decision in: ['reject', 'approve_with_conditions']
+
+| run | (a) 5 calls | (a) 5 distinct roles | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |
+|---|---|---|---|---|---|---|---|
+| 1 | FAIL | FAIL | PASS | FAIL | PASS | reject | FAIL |
+  - note (run 1): expected 5 subagent invocations, got 0 ([])
+  - note (run 1): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+| 2 | FAIL | FAIL | PASS | FAIL | PASS | reject | FAIL |
+  - note (run 2): expected 5 subagent invocations, got 0 ([])
+  - note (run 2): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+| 3 | FAIL | FAIL | PASS | FAIL | PASS | reject | FAIL |
+  - note (run 3): expected 5 subagent invocations, got 0 ([])
+  - note (run 3): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+
+**Agreement across 3 runs:** {'reject': 3} (100% agreed on the most common outcome); 0/3 runs fully passed all checks.
+
+## 03-no-context
+
+Expected final_decision in: ['insufficient_data']
+
+| run | (a) 5 calls | (a) 5 distinct roles | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |
+|---|---|---|---|---|---|---|---|
+| 1 | FAIL | FAIL | PASS | FAIL | PASS | insufficient_data | FAIL |
+  - note (run 1): expected 5 subagent invocations, got 0 ([])
+  - note (run 1): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+| 2 | FAIL | FAIL | PASS | FAIL | PASS | insufficient_data | FAIL |
+  - note (run 2): expected 5 subagent invocations, got 0 ([])
+  - note (run 2): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+| 3 | FAIL | FAIL | PASS | FAIL | PASS | insufficient_data | FAIL |
+  - note (run 3): expected 5 subagent invocations, got 0 ([])
+  - note (run 3): council schema violations: ["unexpected extra field(s): ['regulatory_context_consulted']"]
+
+**Agreement across 3 runs:** {'insufficient_data': 3} (100% agreed on the most common outcome); 0/3 runs fully passed all checks.
+
+---
+
+**Overall: SOME CHECKS FAILED**
+
+Full results written to: C:\Users\darai_qtguapt\Documents\executive-council\examples\.results\20260914-110424\summary.json

@@ -1,0 +1,6 @@
+{
+  "example": "03-no-context",
+  "description": "None of the five context folders contain anything beyond (at most) the standing README template — no real financial, operational, market, technical, or people data is provided for a decision this size. Every subagent should have too little to go on.",
+  "acceptable_final_decisions": ["insufficient_data"],
+  "notes": "This is the one example where a fully empty context/<role>/ folder is staged for the run (the standing README.md is removed for the duration of the run and restored afterward), directly exercising each agent's literal instruction: 'if the folder is empty, return insufficient_data.'"
+}

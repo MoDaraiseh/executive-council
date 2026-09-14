@@ -1,0 +1,6 @@
+{
+  "example": "01-clear-approve",
+  "description": "All five context folders contain supporting, consistent evidence and no compliance/legal/security flag. The council should converge on a clean approve.",
+  "acceptable_final_decisions": ["approve"],
+  "notes": "approve_with_conditions would not be a hard failure of the scenario design, but it is not expected here since nothing in the seeded context calls for conditions. Treat it as a soft warning if it occurs, and treat 'reject' or 'insufficient_data' as a hard failure."
+}

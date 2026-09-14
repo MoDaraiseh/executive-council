@@ -1,0 +1,69 @@
+﻿Staging context/ from: C:\Users\darai_qtguapt\Documents\executive-council\context
+Backing up current context/ before making any changes...
+
+Running 01-clear-approve x3...
+
+Running 02-compliance-red-flag x3...
+
+Running 03-no-context x3...
+
+Restoring original context/ contents...
+
+Raw transcripts written to: C:\Users\darai_qtguapt\Documents\executive-council\examples\.results\20260914-112916
+
+# /council validation report
+
+Generated: 2026-09-14T08:43:49.286759+00:00
+
+## 01-clear-approve
+
+Expected final_decision in: ['approve']
+
+| run | (a) 5 calls | (a) 5 distinct roles | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |
+|---|---|---|---|---|---|---|---|
+| 1 | PASS | PASS | FAIL | PASS | FAIL | approve_with_conditions | FAIL |
+  - note (run 1): subagent schema violations: {'cfo-agent': ['invalid JSON: no JSON object found in text'], 'coo-agent': ['invalid JSON: no JSON object found in text'], 'cmo-agent': ['invalid JSON: no JSON object found in text'], 'cto-agent': ['invalid JSON: no JSON object found in text'], 'chro-agent': ['invalid JSON: no JSON object found in text']}
+  - note (run 1): final_decision 'approve_with_conditions' not in acceptable set ['approve']
+| 2 | PASS | PASS | FAIL | PASS | FAIL | approve_with_conditions | FAIL |
+  - note (run 2): subagent schema violations: {'cfo-agent': ['invalid JSON: no JSON object found in text'], 'coo-agent': ['invalid JSON: no JSON object found in text'], 'cmo-agent': ['invalid JSON: no JSON object found in text'], 'cto-agent': ['invalid JSON: no JSON object found in text'], 'chro-agent': ['invalid JSON: no JSON object found in text']}
+  - note (run 2): final_decision 'approve_with_conditions' not in acceptable set ['approve']
+| 3 | PASS | PASS | FAIL | PASS | FAIL | approve_with_conditions | FAIL |
+  - note (run 3): subagent schema violations: {'cfo-agent': ['invalid JSON: no JSON object found in text'], 'coo-agent': ['invalid JSON: no JSON object found in text'], 'cmo-agent': ['invalid JSON: no JSON object found in text'], 'cto-agent': ['invalid JSON: no JSON object found in text'], 'chro-agent': ['invalid JSON: no JSON object found in text']}
+  - note (run 3): final_decision 'approve_with_conditions' not in acceptable set ['approve']
+
+**Agreement across 3 runs:** {'approve_with_conditions': 3} (100% agreed on the most common outcome); 0/3 runs fully passed all checks.
+
+## 02-compliance-red-flag
+
+Expected final_decision in: ['reject', 'approve_with_conditions']
+
+| run | (a) 5 calls | (a) 5 distinct roles | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |
+|---|---|---|---|---|---|---|---|
+| 1 | PASS | PASS | FAIL | PASS | PASS | reject | FAIL |
+  - note (run 1): subagent schema violations: {'cfo-agent': ['invalid JSON: no JSON object found in text'], 'coo-agent': ['invalid JSON: no JSON object found in text'], 'cmo-agent': ['invalid JSON: no JSON object found in text'], 'cto-agent': ['invalid JSON: no JSON object found in text'], 'chro-agent': ['invalid JSON: no JSON object found in text']}
+| 2 | PASS | PASS | FAIL | PASS | PASS | reject | FAIL |
+  - note (run 2): subagent schema violations: {'cfo-agent': ['invalid JSON: no JSON object found in text'], 'coo-agent': ['invalid JSON: no JSON object found in text'], 'cmo-agent': ['invalid JSON: no JSON object found in text'], 'cto-agent': ['invalid JSON: no JSON object found in text'], 'chro-agent': ['invalid JSON: no JSON object found in text']}
+| 3 | PASS | PASS | FAIL | FAIL | PASS | reject | FAIL |
+  - note (run 3): subagent schema violations: {'cfo-agent': ['invalid JSON: no JSON object found in text'], 'coo-agent': ['invalid JSON: no JSON object found in text'], 'cmo-agent': ['invalid JSON: no JSON object found in text'], 'cto-agent': ['invalid JSON: no JSON object found in text'], 'chro-agent': ['invalid JSON: no JSON object found in text']}
+  - note (run 3): council schema violations: ["unexpected extra field(s): ['human_review_required']"]
+
+**Agreement across 3 runs:** {'reject': 3} (100% agreed on the most common outcome); 0/3 runs fully passed all checks.
+
+## 03-no-context
+
+Expected final_decision in: ['insufficient_data']
+
+| run | (a) 5 calls | (a) 5 distinct roles | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |
+|---|---|---|---|---|---|---|---|
+| 1 | PASS | PASS | PASS | PASS | PASS | insufficient_data | PASS |
+| 2 | PASS | PASS | PASS | PASS | PASS | insufficient_data | PASS |
+| 3 | PASS | PASS | FAIL | PASS | PASS | insufficient_data | FAIL |
+  - note (run 3): subagent schema violations: {'cfo-agent': ['invalid JSON: no JSON object found in text'], 'coo-agent': ['invalid JSON: no JSON object found in text'], 'cmo-agent': ['invalid JSON: no JSON object found in text'], 'cto-agent': ['invalid JSON: no JSON object found in text'], 'chro-agent': ['invalid JSON: no JSON object found in text']}
+
+**Agreement across 3 runs:** {'insufficient_data': 3} (100% agreed on the most common outcome); 2/3 runs fully passed all checks.
+
+---
+
+**Overall: SOME CHECKS FAILED**
+
+Full results written to: C:\Users\darai_qtguapt\Documents\executive-council\examples\.results\20260914-112916\summary.json

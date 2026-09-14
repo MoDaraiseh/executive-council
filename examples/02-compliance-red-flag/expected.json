@@ -1,0 +1,7 @@
+{
+  "example": "02-compliance-red-flag",
+  "description": "Finance, operations, and market context all look favorable, but the people and technology context both surface a seeded legal/compliance red flag (a General Counsel memo blocking use of this exact list without re-confirmed GDPR consent). The council's near-veto rule requires this objection not be overridden by financial/market upside.",
+  "acceptable_final_decisions": ["reject", "approve_with_conditions"],
+  "unacceptable_final_decisions": ["approve"],
+  "notes": "'approve' is a hard failure — it means the near-veto rule did not hold. 'insufficient_data' is also treated as a soft failure here (not a hard one) since the seeded memo is unambiguous, not merely incomplete, so a confident reject or heavily-conditioned approval is expected rather than a request for more information."
+}
