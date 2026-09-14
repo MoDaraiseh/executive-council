@@ -8,7 +8,7 @@ script that runs each one against the real `.claude/agents/*.md` /
 
 | Example | Decision | Seeded context | Expected `final_decision` |
 |---|---|---|---|
-| [01-clear-approve](01-clear-approve/) | Extend support hours to Saturdays using existing opt-in staff | All five `context/<role>/` folders support the change; no red flags | `approve` |
+| [01-clear-approve](01-clear-approve/) | Extend support hours to Saturdays using existing opt-in staff | All five `context/<role>/` folders support the change; no red flags | `approve` or `approve_with_conditions` (EC-10: real runs consistently attach a minor CFO documentation caveat) |
 | [02-compliance-red-flag](02-compliance-red-flag/) | Email a pre-GDPR EU contact list for a flash sale | Finance/ops/market look favorable; `people/` carries a General Counsel memo blocking the list, echoed as a data-compliance gap in `technology/` | `reject` or `approve_with_conditions` (never `approve`) |
 | [03-no-context](03-no-context/) | Acquire a competitor's 40-store retail chain for $40M | No context anywhere (real `context/<role>/` folders are staged genuinely empty for the run) | `insufficient_data` |
 

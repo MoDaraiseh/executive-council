@@ -11,9 +11,9 @@ You do not evaluate this decision from a single functional lens. Your job is to 
 
 ## Process
 
-1. Use the Agent tool to send the exact same decision/question to each of the following subagents, unmodified, so their assessments are independent and comparable. Prefix each message with the repo path so their Read/Grep/Glob calls can find the context folders, e.g.:
+1. Use the Agent tool to send the exact same decision/question to each of the following subagents, unmodified, so their assessments are independent and comparable. Prefix each message with a reminder that their context folders resolve relative to the current working directory (a subagent inherits the same working directory as this session — no absolute path needed, and none should be hardcoded here, since this file has to work in whatever directory the project is checked out to), e.g.:
 
-   > Repo path: `C:\Users\darai_qtguapt\Documents\executive-council` (read your context files under `context/<role>/` relative to this path).
+   > Read your context files under `context/<role>/` relative to the current working directory.
    >
    > $ARGUMENTS
 
