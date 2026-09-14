@@ -63,7 +63,16 @@ RECOMMENDATION_VALUES = {"approve", "approve_with_conditions", "reject", "insuff
 CONFIDENCE_VALUES = {"low", "medium", "high"}
 
 SUBAGENT_SCHEMA_FIELDS = {"role", "recommendation", "confidence", "key_risks", "key_benefits"}
+# XREF-01: a regulatory-context follow-up reply from cto-agent/chro-agent
+# (see REGULATORY_FOLLOWUP_AGENTS below) may add this when it revises its
+# recommendation in light of the saudi-law-tracker query results -- a real,
+# expected reply shape, not schema drift.
+SUBAGENT_OPTIONAL_FIELDS = {"conditions"}
 SUBAGENT_ROLE_VALUES = {"cfo", "coo", "cmo", "cto", "chro"}
+# council.md's XREF-01 step re-invokes exactly these two with regulatory
+# context and asks them to revise their recommendation -- the only agents
+# a real run can legitimately call more than once, and at most twice each.
+REGULATORY_FOLLOWUP_AGENTS = {"cto-agent", "chro-agent"}
 COUNCIL_SCHEMA_FIELDS = {
     "final_decision",
     "confidence",
@@ -122,9 +131,11 @@ def validate_subagent_schema(obj, expected_role: str | None = None) -> list[str]
     missing = SUBAGENT_SCHEMA_FIELDS - obj.keys()
     if missing:
         errors.append(f"missing field(s): {sorted(missing)}")
-    extra = obj.keys() - SUBAGENT_SCHEMA_FIELDS
+    extra = obj.keys() - SUBAGENT_SCHEMA_FIELDS - SUBAGENT_OPTIONAL_FIELDS
     if extra:
         errors.append(f"unexpected extra field(s): {sorted(extra)}")
+    if "conditions" in obj and not isinstance(obj["conditions"], list):
+        errors.append("conditions is not a list")
     if "role" in obj:
         if obj["role"] not in SUBAGENT_ROLE_VALUES:
             errors.append(f"role {obj['role']!r} not in {sorted(SUBAGENT_ROLE_VALUES)}")
@@ -446,16 +457,31 @@ def evaluate_run(task_calls, final_text, expected: dict):
         "errors": [],
     }
 
-    # (a) exactly five subagent invocations
-    count_ok = len(task_calls) == 5
+    # (a) all five roles invoked at least once, with no unexpected repeats.
+    # A plain run is exactly 5 calls, one per role. council.md's XREF-01
+    # regulatory follow-up (step 4) legitimately re-invokes cto-agent and
+    # chro-agent a second time with regulatory context -- 7 calls total,
+    # only those two roles repeated, never more than twice each. Anything
+    # else (a missing role, an unexpected role, a repeat of CFO/COO/CMO, or
+    # cto/chro called a third time) is a real fan-out failure.
     called_agents = [tc["subagent_type"] for tc in task_calls]
-    set_ok = set(called_agents) == EXPECTED_AGENTS and len(called_agents) == len(set(called_agents))
-    result["checks"]["a_five_invocations"] = count_ok
-    result["checks"]["a_five_distinct_roles"] = set_ok
-    if not count_ok:
-        result["errors"].append(f"expected 5 subagent invocations, got {len(task_calls)} ({called_agents})")
-    elif not set_ok:
-        result["errors"].append(f"5 invocations occurred but roles were {called_agents}, expected one each of {sorted(EXPECTED_AGENTS)}")
+    counts = Counter(called_agents)
+    all_roles_present = EXPECTED_AGENTS.issubset(counts) and not (set(counts) - EXPECTED_AGENTS)
+    repeats_ok = all(
+        count == 1 or (agent in REGULATORY_FOLLOWUP_AGENTS and count == 2)
+        for agent, count in counts.items()
+    )
+    result["checks"]["a_five_invocations"] = all_roles_present
+    result["checks"]["a_five_distinct_roles"] = repeats_ok
+    if not all_roles_present:
+        result["errors"].append(
+            f"expected one invocation of each of {sorted(EXPECTED_AGENTS)}, got {called_agents}"
+        )
+    elif not repeats_ok:
+        result["errors"].append(
+            f"unexpected repeat invocation pattern {dict(counts)}: only cto-agent/chro-agent may "
+            "be called a second time (XREF-01 regulatory follow-up), and never more than twice"
+        )
 
     # (b) every subagent reply valid JSON matching schema
     subagent_ok = True
@@ -584,7 +610,7 @@ def print_report(all_results: list[dict]) -> bool:
         summary = summarize(ex)
         print(f"## {ex['example']}\n")
         print(f"Expected final_decision in: {ex['expected'].get('acceptable_final_decisions')}\n")
-        print("| run | (a) 5 calls | (a) 5 distinct roles | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |")
+        print("| run | (a) all 5 roles called | (a) repeats legitimate | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |")
         print("|---|---|---|---|---|---|---|---|")
         for r in ex["runs"]:
             checks = r.get("checks", {})
@@ -709,6 +735,99 @@ def build_broken_transcript():
     return "\n".join(lines)
 
 
+def build_regulatory_followup_transcript():
+    """XREF-01: cto-agent and chro-agent legitimately re-invoked once more
+    with regulatory context (council.md step 4) -- 7 calls total, and the
+    second chro-agent reply adds a `conditions` field when it revises its
+    recommendation. This is the real shape a live run produced (confirmed
+    2026-09-14) that the pre-fix harness incorrectly failed on checks (a)
+    and (b); this fixture proves the fix accepts it."""
+
+    council_reply = json.dumps({
+        "final_decision": "approve_with_conditions",
+        "confidence": "high",
+        "regulatory_context_consulted": True,
+        "council_summary": {
+            "cfo": {"recommendation": "approve", "confidence": "high"},
+            "coo": {"recommendation": "approve", "confidence": "high"},
+            "cmo": {"recommendation": "approve", "confidence": "high"},
+            "cto": {"recommendation": "approve", "confidence": "high"},
+            "chro": {"recommendation": "approve_with_conditions", "confidence": "high"},
+        },
+        "key_disagreements": ["regulatory context changed chro's recommendation"],
+        "reasoning": "regulatory context from saudi-law-tracker changed chro's recommendation",
+    })
+
+    lines = []
+    tool_ids = {}
+
+    first_batch = ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]
+    assistant_content = []
+    for agent in first_batch:
+        tid = f"toolu_{agent}_1"
+        tool_ids[(agent, 1)] = tid
+        assistant_content.append(_make_task_use_block(tid, agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+    for agent in first_batch:
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(tool_ids[(agent, 1)], _good_subagent_reply(role))))
+
+    followup_batch = ["cto-agent", "chro-agent"]
+    assistant_content2 = []
+    for agent in followup_batch:
+        tid = f"toolu_{agent}_2"
+        tool_ids[(agent, 2)] = tid
+        assistant_content2.append(_make_task_use_block(tid, agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content2}}))
+    lines.append(_fixture_line(_make_tool_result(tool_ids[("cto-agent", 2)], _good_subagent_reply("cto"))))
+    chro_followup_reply = json.dumps({
+        "role": "chro",
+        "recommendation": "approve_with_conditions",
+        "confidence": "high",
+        "key_risks": ["needs documentation"],
+        "key_benefits": ["closes gap"],
+        "conditions": ["document non-coercive opt-in", "confirm overtime logging"],
+    })
+    lines.append(_fixture_line(_make_tool_result(tool_ids[("chro-agent", 2)], chro_followup_reply)))
+
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
+    return "\n".join(lines)
+
+
+def build_bad_repeat_transcript():
+    """cfo-agent called twice instead of cto-agent/chro-agent -- not a
+    legitimate XREF-01 repeat pattern, so this must still fail check (a)."""
+
+    council_reply = json.dumps({
+        "final_decision": "approve",
+        "confidence": "high",
+        "regulatory_context_consulted": False,
+        "council_summary": {
+            "cfo": {"recommendation": "approve", "confidence": "high"},
+            "coo": {"recommendation": "approve", "confidence": "high"},
+            "cmo": {"recommendation": "approve", "confidence": "high"},
+            "cto": {"recommendation": "approve", "confidence": "high"},
+            "chro": {"recommendation": "approve", "confidence": "high"},
+        },
+        "key_disagreements": [],
+        "reasoning": "all five agents agreed",
+    })
+
+    lines = []
+    agents = ["cfo-agent", "cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]
+    assistant_content = []
+    for i, agent in enumerate(agents):
+        assistant_content.append(_make_task_use_block(f"toolu_{i}", agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+    for i, agent in enumerate(agents):
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(f"toolu_{i}", _good_subagent_reply(role))))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
+    return "\n".join(lines)
+
+
 def self_test() -> bool:
     ok = True
 
@@ -738,6 +857,25 @@ def self_test() -> bool:
         print("  PASS")
     else:
         print(f"  FAIL: {result}")
+        ok = False
+
+    print("Self-test 4: XREF-01 regulatory follow-up (7 calls, cto/chro repeated, "
+          "chro's 2nd reply has 'conditions') should pass every check...")
+    task_calls, final_text = parse_transcript(build_regulatory_followup_transcript())
+    result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["approve_with_conditions"]})
+    if result["all_pass"]:
+        print("  PASS")
+    else:
+        print(f"  FAIL (harness should accept the legitimate XREF-01 repeat pattern): {result}")
+        ok = False
+
+    print("Self-test 5: cfo-agent called twice (not a legitimate repeat) should still fail check (a)...")
+    task_calls, final_text = parse_transcript(build_bad_repeat_transcript())
+    result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["approve"]})
+    if result["checks"]["a_five_distinct_roles"] is False and not result["all_pass"]:
+        print("  PASS (illegitimate repeat correctly detected)")
+    else:
+        print(f"  FAIL (harness should reject a repeat of anyone but cto-agent/chro-agent): {result}")
         ok = False
 
     return ok

@@ -143,6 +143,43 @@ Expected final_decision in: ['insufficient_data']
 **Overall: ALL CHECKS PASSED**
 ```
 
+## Harness/prompt fix, 2026-09-14 (found during a later re-verification pass)
+
+A fresh `validate.py --runs 3` after the EC-10 fix above surfaced two new,
+real issues neither the original assessment nor the EC-10 fix caught,
+because they only show up when the XREF-01 regulatory step actually finds
+data to act on:
+
+1. **`01-clear-approve` run 3** legitimately triggered the XREF-01
+   regulatory follow-up (mhrsd_labor now has real rows) — 7 subagent calls
+   instead of 5 (cto-agent and chro-agent each invoked twice), and the
+   revised chro-agent reply added a `conditions` field when it changed its
+   recommendation. `validate.py`'s checks (a) and (b) hardcoded "exactly
+   5 calls, exactly these fields" and failed this **correct** council
+   behavior.
+2. **`03-no-context` run 1** had the CEO invent a `human_review_required`
+   top-level field, rejected by the strict council schema. council.md's
+   Reminder section said to "state this in your response" without saying
+   *where*, so the CEO sometimes folded it into `reasoning` (as intended)
+   and sometimes added a new field instead.
+
+Fixes: `validate.py` now accepts cto-agent/chro-agent being invoked a
+second time (and only those two, never more than twice) and accepts an
+optional `conditions` field on a subagent reply (`SUBAGENT_OPTIONAL_FIELDS`,
+`REGULATORY_FOLLOWUP_AGENTS`). council.md's Output format and Reminder
+sections now say explicitly that the human-review note belongs inside
+`reasoning`, not as its own field.
+
+Verified: `--self-test` gained two cases proving the fix — one confirming
+the legitimate 7-call/`conditions` pattern now passes every check, one
+confirming an illegitimate repeat (cfo-agent called twice) still correctly
+fails. The real `01-clear-approve` run-3 transcript now scores `all_pass:
+True` when re-evaluated against the fixed harness. A fresh scoped live
+run of `03-no-context --runs 3` against the corrected council.md produced
+zero occurrences of `human_review_required` across all 3 runs (results
+dir `20260914-214721`, not committed) — the prompt fix holds under a real
+re-run, not just the harness relaxing to tolerate the old behavior.
+
 ## Bottom line
 
 Checks (a) fan-out, (b) subagent schema, and (c) council schema pass on
@@ -152,4 +189,6 @@ repeated run, not just a hand-picked single transcript. With the EC-10 fix
 to `01-clear-approve/expected.json`, all **9 of 9** runs now pass every
 check including (d) — the original 6/9 (with `01-clear-approve` failing
 only the documented soft-variance case) is kept above as the honest
-original record.
+original record. The harness/prompt fix above addresses two further issues
+found in later re-verification, after real regulatory-context data made
+the XREF-01 follow-up path actually fire for the first time.
