@@ -263,6 +263,14 @@ def parse_transcript(raw_stdout: str):
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue  # not every line is guaranteed to be a clean event; skip
+        if not isinstance(obj, dict):
+            # A line can be valid JSON and still not be an event object --
+            # confirmed live 2026-09-15 (01-clear-approve): a bare
+            # JSON-encoded string line (verbose CLI commentary, not a
+            # {"type": ...} event) crashed obj.get("type") here. Any other
+            # bare JSON scalar (number, bool, null, list) is equally not an
+            # event we can parse, so skip all of them the same way.
+            continue
 
         obj_type = obj.get("type")
 
@@ -395,6 +403,44 @@ def parse_transcript(raw_stdout: str):
     return task_calls, final_text
 
 
+def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
+    """Scans the raw transcript directly for a Bash tool_use invoking the
+    saudi-law-tracker query CLI (council.md step 5's regulatory step).
+
+    This exists as a deliberate second signal, independent of the CEO's own
+    self-reported `regulatory_context_consulted` field in the final council
+    JSON. A self-report can be wrong in either direction -- the CEO could
+    run the query and still write `false`, or claim `true` without ever
+    actually invoking Bash -- and check (e) previously trusted it alone.
+    Reading the actual tool call the CLI executed is the only way to know
+    "the query was never invoked" is true, rather than merely claimed by
+    the same model whose jurisdiction judgment this whole gate exists to
+    stop trusting (see EC-02, 2026-09-15: the CEO ran this exact query on
+    an unestablished jurisdiction in 4/4 live batches despite four
+    escalating prompt-only fixes).
+    """
+    for line in raw_stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "assistant":
+            continue
+        content = (obj.get("message") or {}).get("content") or []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use" or block.get("name") != "Bash":
+                continue
+            command = (block.get("input") or {}).get("command") or ""
+            if "saudi-law-tracker" in command.lower():
+                return True
+    return False
+
+
 # --------------------------------------------------------------------------
 # Context staging / restore
 # --------------------------------------------------------------------------
@@ -458,7 +504,18 @@ def stage_example(example_dir: Path) -> None:
 
 def run_council(decision_text: str, claude_bin: str, skip_permissions: bool, timeout: int):
     prompt = f"/council {decision_text}"
-    cmd = [claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose"]
+    # The prompt is passed via stdin (input=prompt below), not as an inline
+    # CLI argument -- confirmed live 2026-09-15 (01-clear-approve): once
+    # decision.md gained a multi-line `jurisdiction: ...\n\nProposal: ...`
+    # shape, an inline `-p <prompt>` arg got silently truncated at the first
+    # newline by the Windows claude.cmd npm shim re-parsing the argument
+    # string through cmd.exe a second time (the CEO received only
+    # "jurisdiction: unspecified" and nothing after it, all 9/9 runs). This
+    # is the same root cause already found and fixed the same way in
+    # saudi-law-tracker's evals/agent/run_evals.py (run_judge()) -- not a
+    # length-limit issue, a multi-line-inline-argument quoting issue.
+    # Piping via stdin sidesteps the CLI re-quoting entirely.
+    cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose"]
     if skip_permissions:
         # Verified live (2026-09-14, claude-code 2.1.270): the subagent-spawn
         # tool is actually named "Agent" now, not "Task" (a real transcript
@@ -478,6 +535,7 @@ def run_council(decision_text: str, claude_bin: str, skip_permissions: bool, tim
         proc = subprocess.run(
             cmd,
             cwd=str(REPO_ROOT),
+            input=prompt,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -496,8 +554,17 @@ def run_council(decision_text: str, claude_bin: str, skip_permissions: bool, tim
 # --------------------------------------------------------------------------
 
 
-def evaluate_run(task_calls, final_text, expected: dict):
-    """Runs checks (a)-(d) against one parsed transcript. Returns a result dict."""
+def evaluate_run(task_calls, final_text, expected: dict, raw_stdout: str | None = None):
+    """Runs checks (a)-(e) against one parsed transcript. Returns a result dict.
+
+    `raw_stdout`, when given, is the full raw transcript text -- used by
+    check (e) to mechanically detect whether the saudi-law-tracker Bash
+    query actually ran (see regulatory_bash_query_invoked), independent of
+    the CEO's own self-reported regulatory_context_consulted field. Callers
+    that don't have the raw transcript handy (e.g. older self-test fixtures
+    built directly from task_calls/final_text) fall back to the self-report
+    alone; every self-test that specifically exercises check (e) passes the
+    raw transcript explicitly."""
     result = {
         "checks": {},
         "final_decision": None,
@@ -571,35 +638,63 @@ def evaluate_run(task_calls, final_text, expected: dict):
             f"final_decision {result['final_decision']!r} not in acceptable set {sorted(acceptable)}"
         )
 
-    # (e) regulatory_context_consulted matches expected, when an example
-    # declares one. This exists because council.md's own prompt-level
-    # instructions telling the CEO not to assume a Saudi jurisdiction from
-    # an unstated location proved unreliable in practice: three escalating
-    # rewordings (never resolve an ambiguous phrase into a real place ->
-    # a two-part jurisdiction/subject-matter gate -> a mandatory "write down
-    # a literal quote or admit jurisdiction is unestablished" checkpoint)
-    # all failed the same live 03-no-context re-test, with the CEO still
-    # asserting "this plainly touches Saudi regulatory territory" and
-    # setting regulatory_context_consulted: true off nothing but generic
-    # labor/tax/licensing language -- confirmed 2026-09-15 across 4
-    # consecutive fresh 3-run batches. The final_decision label alone
-    # doesn't catch this: 03-no-context still reliably lands on
-    # insufficient_data because the empty context/ folders are independently
-    # sufficient for that outcome, so a passing (d) can silently coexist
-    # with the CEO having fabricated a jurisdiction and (per run 3 of the
-    # last batch) let it sway CHRO to approve_with_conditions. This check
-    # makes that failure visible instead of relying on the final label.
+    # (e) the regulatory step matches expected, when an example declares one.
+    # This exists because council.md's own prompt-level instructions telling
+    # the CEO not to assume a Saudi jurisdiction from an unstated location
+    # proved unreliable in practice: four escalating rewordings (never
+    # resolve an ambiguous phrase into a real place -> a two-part
+    # jurisdiction/subject-matter gate -> a mandatory "write down a literal
+    # quote or admit jurisdiction is unestablished" checkpoint -> removing
+    # the hardcoded "this council operates under Saudi Arabia" framing from
+    # cfo/cto/chro-agent.md's own Local context sections) all failed the
+    # same live 03-no-context re-test, with the CEO still running the query
+    # off nothing but generic labor/tax/licensing language or a subagent's
+    # own hedge -- confirmed 2026-09-15 across 4 consecutive fresh 3-run
+    # batches. The final_decision label alone doesn't catch this:
+    # 03-no-context still reliably lands on insufficient_data because the
+    # empty context/ folders are independently sufficient for that outcome,
+    # so a passing (d) can silently coexist with the CEO having fabricated a
+    # jurisdiction and let it sway CHRO's confidence. council.md now reads
+    # jurisdiction from a required, literal `jurisdiction:` field instead of
+    # inferring it -- but this check stays in place as a defense-in-depth
+    # backstop regardless, watching for the failure mode in case anything
+    # else ever triggers it.
+    #
+    # The primary signal is the actual Bash tool_use captured straight from
+    # the raw transcript (regulatory_bash_query_invoked), not the CEO's own
+    # self-reported regulatory_context_consulted field -- a self-report can
+    # be wrong in either direction, so "the query was never invoked" needs
+    # to be verified from what the CLI actually did, not just claimed by the
+    # same model this whole gate exists to stop trusting on this point. When
+    # no raw transcript is available (older self-test callers), this falls
+    # back to the self-reported field alone.
     expected_regulatory = expected.get("expected_regulatory_context_consulted")
-    if expected_regulatory is not None and council_parsed is not None:
-        actual_regulatory = council_parsed.get("regulatory_context_consulted")
-        e_ok = actual_regulatory == expected_regulatory
-        result["checks"]["e_regulatory_consulted_expected"] = e_ok
-        if not e_ok:
-            result["errors"].append(
-                f"regulatory_context_consulted was {actual_regulatory!r}, expected {expected_regulatory!r} "
-                "-- decision.md/context/ for this example contain no jurisdiction-establishing detail, "
-                "so the regulatory step should never fire (see council.md step 3a)"
-            )
+    if expected_regulatory is not None:
+        actual_self_report = council_parsed.get("regulatory_context_consulted") if council_parsed else None
+        if raw_stdout is not None:
+            actual_bash_invoked = regulatory_bash_query_invoked(raw_stdout)
+            e_ok = actual_bash_invoked == expected_regulatory
+            result["checks"]["e_regulatory_consulted_expected"] = e_ok
+            if not e_ok:
+                result["errors"].append(
+                    f"regulatory Bash step actually invoked={actual_bash_invoked}, expected {expected_regulatory!r} "
+                    "-- decision.md's jurisdiction: field for this example does not name a recognized Saudi "
+                    "jurisdiction, so the saudi-law-tracker query should never run (see council.md step 4)"
+                )
+            if actual_self_report is not None and actual_self_report != actual_bash_invoked:
+                result["errors"].append(
+                    f"CEO self-reported regulatory_context_consulted={actual_self_report!r} does not match "
+                    f"the actual Bash invocation ({actual_bash_invoked!r}) found in the transcript -- the "
+                    "self-report is not trustworthy on its own, which is why check (e) reads the transcript directly"
+                )
+        else:
+            e_ok = actual_self_report == expected_regulatory if actual_self_report is not None else None
+            result["checks"]["e_regulatory_consulted_expected"] = e_ok
+            if e_ok is False:
+                result["errors"].append(
+                    f"regulatory_context_consulted was {actual_self_report!r}, expected {expected_regulatory!r} "
+                    "(no raw transcript was supplied to cross-check the actual Bash invocation)"
+                )
     else:
         result["checks"]["e_regulatory_consulted_expected"] = None
 
@@ -650,7 +745,7 @@ def run_example(example_dir: Path, runs: int, claude_bin: str, skip_permissions:
             continue
 
         task_calls, final_text = parse_transcript(stdout)
-        result = evaluate_run(task_calls, final_text, expected)
+        result = evaluate_run(task_calls, final_text, expected, raw_stdout=stdout)
         result["run"] = i
         result["returncode"] = returncode
         run_results.append(result)
@@ -745,6 +840,14 @@ def _make_task_use_block(tool_id, subagent_type, description="eval", prompt="...
 
 def _make_tool_result(tool_id, text):
     return {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
+
+
+def _make_bash_tool_use_block(tool_id, command='"C:\\Users\\darai_qtguapt\\saudi-law-tracker\\.venv\\Scripts\\saudi-law-tracker.exe" query --sector labor --json'):
+    """Council.md step 5's regulatory query, as it actually appears in a raw
+    transcript -- used to give regulatory_bash_query_invoked something real
+    to detect in self-test fixtures, rather than only ever testing against
+    the CEO's self-reported field."""
+    return {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": command}}
 
 
 def _good_subagent_reply(role: str) -> str:
@@ -866,6 +969,52 @@ def build_unjustified_regulatory_consult_transcript():
     for agent, tid in tool_ids.items():
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
+    # The actual Bash invocation, not just the self-reported field -- this is
+    # what regulatory_bash_query_invoked() must detect for check (e) to fire
+    # on the real failure mode rather than only ever on a hand-set boolean.
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]}}))
+    lines.append(_fixture_line(_make_tool_result("toolu_bash1", '{"rows": []}')))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
+    return "\n".join(lines)
+
+
+def build_self_report_mismatch_transcript():
+    """The CEO's self-reported regulatory_context_consulted: False, but the
+    transcript shows the Bash query was actually invoked -- the exact
+    "not just landing there by coincidence" case check (e) must catch by
+    reading the transcript directly rather than trusting the self-report.
+    Must fail check (e) (self-report alone would have wrongly passed it)."""
+
+    council_reply = json.dumps({
+        "final_decision": "insufficient_data",
+        "confidence": "high",
+        "regulatory_context_consulted": False,
+        "council_summary": {
+            "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "coo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "cto": {"recommendation": "insufficient_data", "confidence": "high"},
+            "chro": {"recommendation": "insufficient_data", "confidence": "high"},
+        },
+        "key_disagreements": [],
+        "reasoning": "No jurisdiction was specified, so no regulatory query was run.",
+    })
+
+    lines = []
+    tool_ids = {}
+    assistant_content = []
+    for agent in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]:
+        tid = f"toolu_{agent}"
+        tool_ids[agent] = tid
+        assistant_content.append(_make_task_use_block(tid, agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+    for agent, tid in tool_ids.items():
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
+    # The query actually ran, contradicting the self-report above.
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]}}))
+    lines.append(_fixture_line(_make_tool_result("toolu_bash1", '{"rows": []}')))
     lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
@@ -938,6 +1087,13 @@ def build_regulatory_followup_transcript():
     for agent in first_batch:
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(tool_ids[(agent, 1)], _good_subagent_reply(role))))
+
+    # The actual regulatory query (council.md step 5) runs before the
+    # cto-agent/chro-agent follow-up -- its results are what gets forwarded
+    # to them. Included here so regulatory_bash_query_invoked() has a real
+    # invocation to detect for this genuinely regulatory-tagged run.
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]}}))
+    lines.append(_fixture_line(_make_tool_result("toolu_bash1", '{"rows": [{"title": "Labor Law Art. 41", "source_url": "https://example.gov.sa/x"}]}')))
 
     followup_batch = ["cto-agent", "chro-agent"]
     assistant_content2 = []
@@ -1072,13 +1228,21 @@ def self_test() -> bool:
         ok = False
 
     print("Self-test 4: XREF-01 regulatory follow-up (7 calls, cto/chro repeated, "
-          "chro's 2nd reply has 'conditions') should pass every check...")
-    task_calls, final_text = parse_transcript(build_regulatory_followup_transcript())
-    result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["approve_with_conditions"]})
-    if result["all_pass"]:
+          "chro's 2nd reply has 'conditions', a real Bash query invoked) should pass every check "
+          "including (e) on the genuine positive path...")
+    regulatory_followup_raw = build_regulatory_followup_transcript()
+    task_calls, final_text = parse_transcript(regulatory_followup_raw)
+    result = evaluate_run(
+        task_calls,
+        final_text,
+        {"acceptable_final_decisions": ["approve_with_conditions"], "expected_regulatory_context_consulted": True},
+        raw_stdout=regulatory_followup_raw,
+    )
+    if result["all_pass"] and result["checks"]["e_regulatory_consulted_expected"] is True:
         print("  PASS")
     else:
-        print(f"  FAIL (harness should accept the legitimate XREF-01 repeat pattern): {result}")
+        print(f"  FAIL (harness should accept the legitimate XREF-01 repeat pattern, "
+              f"including a correctly-detected real regulatory consult): {result}")
         ok = False
 
     print("Self-test 5: cfo-agent called twice (not a legitimate repeat) should still fail check (a)...")
@@ -1115,13 +1279,16 @@ def self_test() -> bool:
         print(f"  FAIL (harness should reject any council JSON field beyond COUNCIL_SCHEMA_FIELDS): {result}")
         ok = False
 
-    print("Self-test 8: regulatory_context_consulted: true on a no-jurisdiction "
-          "example should fail check (e) even though (a)-(d) all pass...")
-    task_calls, final_text = parse_transcript(build_unjustified_regulatory_consult_transcript())
+    print("Self-test 8: a real Bash regulatory query actually invoked on a "
+          "no-jurisdiction example should fail check (e) even though (a)-(d) all pass, "
+          "detected from the transcript itself (not the self-reported field)...")
+    unjustified_raw = build_unjustified_regulatory_consult_transcript()
+    task_calls, final_text = parse_transcript(unjustified_raw)
     result = evaluate_run(
         task_calls,
         final_text,
         {"acceptable_final_decisions": ["insufficient_data"], "expected_regulatory_context_consulted": False},
+        raw_stdout=unjustified_raw,
     )
     if (
         result["checks"]["e_regulatory_consulted_expected"] is False
@@ -1136,6 +1303,26 @@ def self_test() -> bool:
     else:
         print(f"  FAIL (harness should catch a jurisdiction-unjustified regulatory consult "
               f"regardless of final_decision): {result}")
+        ok = False
+
+    print("Self-test 9: CEO self-reports regulatory_context_consulted: false, but the "
+          "transcript shows the Bash query was actually invoked -- check (e) must catch this "
+          "from the transcript, not trust the self-report...")
+    mismatch_raw = build_self_report_mismatch_transcript()
+    task_calls, final_text = parse_transcript(mismatch_raw)
+    result = evaluate_run(
+        task_calls,
+        final_text,
+        {"acceptable_final_decisions": ["insufficient_data"], "expected_regulatory_context_consulted": False},
+        raw_stdout=mismatch_raw,
+    )
+    mismatch_flagged = any("does not match the actual Bash invocation" in e for e in result["errors"])
+    if result["checks"]["e_regulatory_consulted_expected"] is False and mismatch_flagged:
+        print("  PASS (self-report/transcript mismatch correctly caught -- "
+              "a false self-report alone would have wrongly passed this run)")
+    else:
+        print(f"  FAIL (harness must not trust the self-reported field over the actual "
+              f"transcript): {result}")
         ok = False
 
     return ok

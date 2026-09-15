@@ -6,15 +6,17 @@ script that runs each one against the real `.claude/agents/*.md` /
 
 ## Examples
 
-| Example | Decision | Seeded context | Expected `final_decision` |
-|---|---|---|---|
-| [01-clear-approve](01-clear-approve/) | Extend support hours to Saturdays using existing opt-in staff | All five `context/<role>/` folders support the change; no red flags | `approve` or `approve_with_conditions` (EC-10: real runs consistently attach a minor CFO documentation caveat) |
-| [02-compliance-red-flag](02-compliance-red-flag/) | Email a pre-GDPR EU contact list for a flash sale | Finance/ops/market look favorable; `people/` carries a General Counsel memo blocking the list, echoed as a data-compliance gap in `technology/` | `reject` or `approve_with_conditions` (never `approve`) |
-| [03-no-context](03-no-context/) | Acquire a competitor's 40-store retail chain for $40M | No context anywhere (real `context/<role>/` folders are staged genuinely empty for the run) | `insufficient_data` |
+| Example | Decision | Jurisdiction | Seeded context | Expected `final_decision` | Regulatory step |
+|---|---|---|---|---|---|
+| [01-clear-approve](01-clear-approve/) | Extend support hours to Saturdays using existing opt-in staff | `unspecified` (verified 2026-09-15: nothing in decision.md or context/ ever names a jurisdiction) | All five `context/<role>/` folders support the change; no red flags | `approve` or `approve_with_conditions` (EC-10: real runs consistently attach a minor CFO documentation caveat) | Must NOT run |
+| [02-compliance-red-flag](02-compliance-red-flag/) | Email a pre-GDPR EU contact list for a flash sale | `EU` (the compliance issue is genuinely GDPR/EU consent law, not Saudi) | Finance/ops/market look favorable; `people/` carries a General Counsel memo blocking the list, echoed as a data-compliance gap in `technology/` | `reject` or `approve_with_conditions` (never `approve`) | Must NOT run |
+| [03-no-context](03-no-context/) | Acquire a competitor's 40-store retail chain for $40M | `unspecified` | No context anywhere (real `context/<role>/` folders are staged genuinely empty for the run) | `insufficient_data` | Must NOT run |
+
+Every example here is jurisdiction-`unspecified` or non-Saudi — none of the three currently exercises the regulatory step's positive path against a real live decision (only `--self-test`'s `build_regulatory_followup_transcript` fixture covers that path, synthetically). `01-clear-approve` was originally assumed to be a KSA scenario; live re-verification (2026-09-15, see `VALIDATION_REPORT.md`) found it never actually stated one, and the CFO's recurring "zakat" caveat there had been the same unjustified-jurisdiction bug this suite's check (e) now catches, not a real scenario feature.
 
 Each example folder has:
-- `decision.md` — the exact proposal text, passed verbatim as `$ARGUMENTS` to `/council`.
-- `expected.json` — the acceptable `final_decision` value(s) and why.
+- `decision.md` — the exact proposal text, passed verbatim as `$ARGUMENTS` to `/council`, starting with a `jurisdiction:` line (required — see the root [README.md](../README.md#how-to-invoke-it)).
+- `expected.json` — the acceptable `final_decision` value(s), an optional `expected_regulatory_context_consulted` (true/false) checked by check (e), and why.
 - `context/<role>/` — the documents to stage into the repo's real `context/<role>/` folders before running (absent for `03-no-context`, by design).
 
 ## Running validation
@@ -39,9 +41,16 @@ the script:
    for XREF-01's regulatory follow-up — never any other role, and never a
    third time); (b) every subagent reply is valid JSON matching the 5-field
    schema (`conditions` is an optional 6th field, added by a regulatory
-   follow-up reply that revises a recommendation); (c) the final council
-   JSON matches its schema; (d) `final_decision` is in the example's
-   acceptable set.
+   follow-up reply that revises a recommendation), with no extra top-level
+   fields beyond that; (c) the final council JSON matches its schema, with
+   no extra top-level fields beyond it either; (d) `final_decision` is in
+   the example's acceptable set; (e) when an example declares an
+   `expected_regulatory_context_consulted`, whether the saudi-law-tracker
+   Bash query actually ran (detected from the transcript's real tool_use
+   calls, not the CEO's self-reported `regulatory_context_consulted` field)
+   matches it — this is a defense-in-depth backstop for the `jurisdiction:`
+   gate (see the root README), watching for the failure mode in case
+   anything ever bypasses that gate.
 5. Restores the original `context/<role>/` contents (always, even on error).
 
 **Known transcript artifact:** the Claude Code CLI can emit an extra,

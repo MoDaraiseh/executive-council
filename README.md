@@ -12,15 +12,33 @@ From within Claude Code, in this repo:
 /council <the decision or question you want evaluated>
 ```
 
+**`jurisdiction:` is a required field.** Prefix your decision with a line naming the jurisdiction, or `unspecified` if it doesn't have one:
+
+```
+/council jurisdiction: KSA
+
+Should we launch this hiring plan in Riyadh?
+```
+
+```
+/council jurisdiction: unspecified
+
+Should we acquire this competitor's retail chain?
+```
+
+This isn't optional decoration — it's how the council decides whether to run its one regulatory tool (a Saudi-law lookup, see step 4 below), and it's read mechanically, not inferred. `unspecified` is a fully valid, expected value: it guarantees the regulatory step is skipped rather than guessed at. Only `KSA` and `Saudi Arabia` (case-insensitive) are recognized as Saudi jurisdiction; anything else — a different country/region name, `unspecified`, `unknown`, or the field being left off entirely — skips the regulatory step and is noted plainly in the final `reasoning`. If you omit the field, the council still runs, but treats it as `unspecified` rather than guessing your company's jurisdiction from the rest of the decision text — do not rely on that fallback for a decision that actually needs the regulatory check; state the jurisdiction explicitly instead. (This replaced free-text jurisdiction inference by the CEO step, which repeatedly assumed Saudi Arabia by default even when nothing in the decision said so — see [examples/VALIDATION_REPORT.md](examples/VALIDATION_REPORT.md).)
+
 For example:
 
 ```
-/council Should we extend customer support to Saturdays using existing opt-in part-time staff?
+/council jurisdiction: unspecified
+
+Should we extend customer support to Saturdays using existing opt-in part-time staff?
 ```
 
 That single command is defined in [.claude/commands/council.md](.claude/commands/council.md). Behind it:
 
-1. The CEO (this command, running on `model: opus` — the highest-judgment step in the flow) sends your exact question, unmodified, to all five subagents in [.claude/agents/](.claude/agents/): `cfo-agent`, `coo-agent`, `cmo-agent`, `cto-agent`, `chro-agent`.
+1. The CEO (this command, running on `model: opus` — the highest-judgment step in the flow) reads the `jurisdiction:` field mechanically, then sends your exact question, unmodified, to all five subagents in [.claude/agents/](.claude/agents/): `cfo-agent`, `coo-agent`, `cmo-agent`, `cto-agent`, `chro-agent`.
 2. Each subagent reads every file under its own `context/<role>/` folder (see [The context/ folder](#the-context-folder)) and returns a fixed JSON structure:
    ```json
    { "recommendation": "approve | approve_with_conditions | reject | insufficient_data",
@@ -58,7 +76,7 @@ Each folder ships with its own `README.md` describing what belongs there. Before
 
 Because these folders are meant to hold real, often sensitive business documents (budgets, legal memos, headcount data...), everything placed under `context/<role>/` other than the folder's own `README.md` is git-ignored — see [.gitignore](.gitignore). Nothing you drop in there gets committed by default.
 
-Each agent also carries a short **Local context** section calibrating it to Saudi Arabia (KSA) regulatory norms — e.g. the CFO agent for Sharia-compliant financing, zakat, VAT, and ZATCA e-invoicing; the CTO agent for PDPL data residency and the NCA's Essential Cybersecurity Controls; the CHRO agent for Saudization/Nitaqat bands, KSA notice periods, and end-of-service benefit exposure.
+Each of the CFO, CTO, and CHRO agents also carries a short **Local context** section covering Saudi Arabia (KSA) regulatory norms — the CFO agent for Sharia-compliant financing, zakat, VAT, and ZATCA e-invoicing; the CTO agent for PDPL data residency and the NCA's Essential Cybersecurity Controls; the CHRO agent for Saudization/Nitaqat bands, KSA notice periods, and end-of-service benefit exposure. Each of these three only weighs its KSA-specific items when the decision's `jurisdiction:` field literally reads `KSA` or `Saudi Arabia` — this is a mechanical field read, the same one the CEO step uses, not something any agent infers from the rest of the decision text.
 
 ## Examples and validation
 
