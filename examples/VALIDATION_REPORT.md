@@ -180,6 +180,32 @@ zero occurrences of `human_review_required` across all 3 runs (results
 dir `20260914-214721`, not committed) — the prompt fix holds under a real
 re-run, not just the harness relaxing to tolerate the old behavior.
 
+## Placeholder-launch filter, 2026-09-15
+
+A separate fresh `validate.py --runs 3` (results dir `20260914-220658`, not
+committed) reproduced a different anomaly: `03-no-context` run 2 showed a
+6th subagent invocation — `subagent_type: "general-purpose"`,
+`description`/`prompt` both literally `"placeholder"`, no `tool_result`
+ever returned. Traced precisely against the actual check logic (not
+inferred from the printed table): this was **not** a bug in the fan-out or
+schema checks -- `a_five_invocations` correctly went `False` because
+`general-purpose` isn't in `EXPECTED_AGENTS`, and `b_subagent_schema_valid`
+independently went `False` because that entry's non-existent result
+couldn't be parsed as JSON. Both checks counted all 6 entries and correctly
+failed the run for the right reasons; nothing let the phantom slip through
+uncounted.
+
+Even so, it's a real, recurring CLI-level artifact (a phantom async launch
+alongside genuine ones in the same `background_tasks_changed` batch), not
+a defect in council.md or the 5 real subagents, which all ran and replied
+correctly in that same transcript. `parse_transcript` now filters out any
+launch with `description` or `prompt` exactly `"placeholder"` and no
+result, documented in a comment at `_is_placeholder_launch_artifact` and in
+`examples/README.md`. `--self-test` gained a 6th case (5 real calls plus
+the exact phantom shape) proving the filtered run now passes every check;
+re-scoring all 9 real transcripts from the `20260914-220658` run against
+the fix confirms **9/9 now pass**, `03-no-context` run 2 included.
+
 ## Bottom line
 
 Checks (a) fan-out, (b) subagent schema, and (c) council schema pass on
@@ -189,6 +215,7 @@ repeated run, not just a hand-picked single transcript. With the EC-10 fix
 to `01-clear-approve/expected.json`, all **9 of 9** runs now pass every
 check including (d) — the original 6/9 (with `01-clear-approve` failing
 only the documented soft-variance case) is kept above as the honest
-original record. The harness/prompt fix above addresses two further issues
-found in later re-verification, after real regulatory-context data made
-the XREF-01 follow-up path actually fire for the first time.
+original record. The two sections above address three further issues found
+in later re-verification: the XREF-01 follow-up path actually firing for
+the first time (real regulatory-context data now exists), and a harmless
+but previously-uncounted CLI transcript artifact.

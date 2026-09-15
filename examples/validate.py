@@ -193,10 +193,47 @@ _ROLE_RESPONDED_RE = re.compile(r"\b(cfo|coo|cmo|cto|chro)\b[^.\n]{0,40}\brespon
 _SUBAGENT_JSON_HINT_RE = re.compile(r'"recommendation"\s*:', re.IGNORECASE)
 
 
+def _is_placeholder_launch_artifact(tc: dict) -> bool:
+    """True for a known, harmless Claude Code CLI transcript artifact, not a
+    real subagent invocation.
+
+    Confirmed live 2026-09-14 (claude-code 2.1.270, executive-council
+    03-no-context run 2): when the CEO launches multiple subagents
+    asynchronously in one batch, the stream-json transcript can include an
+    extra, phantom `Agent`/`Task` tool_use entry alongside the real ones --
+    `subagent_type: "general-purpose"`, with `description` and `prompt`
+    both literally the string `"placeholder"`, and no `tool_result` ever
+    returned for it (the task is never actually started, just listed in a
+    `background_tasks_changed` event next to the real async launches).
+
+    This is a client-side quirk in how the CLI represents a batch of async
+    agent launches -- nothing in council.md or any subagent prompt asks for
+    or causes it. Left uncounted, it looks like an unexpected 6th subagent
+    invocation and fails checks (a) and (b) on an otherwise fully correct
+    run (the 5 real subagents all ran and replied correctly in that same
+    transcript). Filtering it here, rather than special-casing it in
+    evaluate_run, keeps the checks themselves simple and accurate for what
+    they're actually meant to verify: real subagent invocations.
+
+    Deliberately narrow: only a launch with *no result* where *either*
+    description or prompt is exactly "placeholder" is dropped. If you see
+    this recur with a real result attached, or with different placeholder-
+    looking text, don't widen this filter to cover it without re-verifying
+    live first -- that shape could be a genuine new problem, not this one.
+    """
+    return (
+        tc.get("result_text") is None
+        and (tc.get("description") == "placeholder" or tc.get("prompt") == "placeholder")
+    )
+
+
 def parse_transcript(raw_stdout: str):
     """Parses NDJSON stream-json output into (task_calls, final_text).
 
-    task_calls: list of {"id", "subagent_type", "result_text"} in call order.
+    task_calls: list of {"id", "subagent_type", "description", "prompt",
+    "result_text"} in call order -- known-harmless phantom launches are
+    already filtered out (see _is_placeholder_launch_artifact) by the time
+    this returns, so callers never need to special-case them.
     final_text: the last assistant-visible text block (expected to be the
     council's final JSON), or the `result` field of a terminal `result`
     event as a fallback.
@@ -239,9 +276,12 @@ def parse_transcript(raw_stdout: str):
                     # "Agent" is the current tool name (verified live,
                     # 2026-09-14, claude-code 2.1.270); "Task" is accepted
                     # too in case an older/newer build renames it again.
+                    inp = block.get("input") or {}
                     tc = {
                         "id": block.get("id"),
-                        "subagent_type": (block.get("input") or {}).get("subagent_type"),
+                        "subagent_type": inp.get("subagent_type"),
+                        "description": inp.get("description"),
+                        "prompt": inp.get("prompt"),
                         "result_text": None,
                     }
                     task_calls.append(tc)
@@ -344,6 +384,13 @@ def parse_transcript(raw_stdout: str):
         # for any run recorded after 2026-09-14. If you see "invalid JSON: no
         # text content to parse" for a run, grep that run's .stdout.jsonl for
         # `"recommendation":` before concluding the council itself failed.
+
+    # Drop known-harmless phantom launches (see _is_placeholder_launch_artifact)
+    # after the resolution passes above, not before: a placeholder entry's
+    # subagent_type never matches a real role name, so it can't have been
+    # (mis)claimed as one, but checking post-resolution keeps this filter
+    # correct even if that ever changed.
+    task_calls = [tc for tc in task_calls if not _is_placeholder_launch_artifact(tc)]
 
     return task_calls, final_text
 
@@ -654,8 +701,13 @@ def _fixture_line(obj) -> str:
     return json.dumps(obj)
 
 
-def _make_task_use_block(tool_id, subagent_type):
-    return {"type": "tool_use", "id": tool_id, "name": "Agent", "input": {"subagent_type": subagent_type, "description": "eval", "prompt": "..."}}
+def _make_task_use_block(tool_id, subagent_type, description="eval", prompt="..."):
+    return {
+        "type": "tool_use",
+        "id": tool_id,
+        "name": "Agent",
+        "input": {"subagent_type": subagent_type, "description": description, "prompt": prompt},
+    }
 
 
 def _make_tool_result(tool_id, text):
@@ -828,6 +880,51 @@ def build_bad_repeat_transcript():
     return "\n".join(lines)
 
 
+def build_placeholder_artifact_transcript():
+    """5 real subagent calls plus a phantom `general-purpose` launch with
+    description/prompt both "placeholder" and no result -- the real shape
+    confirmed live 2026-09-14 (03-no-context run 2). Must still pass every
+    check once _is_placeholder_launch_artifact filters the phantom out."""
+
+    council_reply = json.dumps({
+        "final_decision": "insufficient_data",
+        "confidence": "high",
+        "regulatory_context_consulted": False,
+        "council_summary": {
+            "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "coo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "cto": {"recommendation": "insufficient_data", "confidence": "high"},
+            "chro": {"recommendation": "insufficient_data", "confidence": "high"},
+        },
+        "key_disagreements": [],
+        "reasoning": "all context folders empty",
+    })
+
+    lines = []
+    tool_ids = {}
+    real_agents = ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]
+    assistant_content = []
+    for agent in real_agents:
+        tid = f"toolu_{agent}"
+        tool_ids[agent] = tid
+        assistant_content.append(_make_task_use_block(tid, agent))
+    # The phantom entry: its own tool_use block, batched alongside the real
+    # ones, with no matching tool_result ever appended below.
+    phantom_id = "toolu_phantom"
+    assistant_content.append(_make_task_use_block(phantom_id, "general-purpose", "placeholder", "placeholder"))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+
+    for agent in real_agents:
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(tool_ids[agent], _good_subagent_reply(role))))
+    # (deliberately no tool_result for phantom_id)
+
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
+    return "\n".join(lines)
+
+
 def self_test() -> bool:
     ok = True
 
@@ -877,6 +974,21 @@ def self_test() -> bool:
     else:
         print(f"  FAIL (harness should reject a repeat of anyone but cto-agent/chro-agent): {result}")
         ok = False
+
+    print("Self-test 6: phantom 'general-purpose'/'placeholder' launch with no "
+          "result should be filtered out, not counted as a 6th invocation...")
+    task_calls, final_text = parse_transcript(build_placeholder_artifact_transcript())
+    if len(task_calls) != 5:
+        print(f"  FAIL (expected the phantom launch to be filtered, got {len(task_calls)} task_calls): "
+              f"{[tc['subagent_type'] for tc in task_calls]}")
+        ok = False
+    else:
+        result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["insufficient_data"]})
+        if result["all_pass"]:
+            print("  PASS (phantom launch filtered, real 5-agent run passes every check)")
+        else:
+            print(f"  FAIL (phantom launch was filtered but the run still failed a check): {result}")
+            ok = False
 
     return ok
 

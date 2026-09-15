@@ -34,11 +34,28 @@ the script:
 2. Clears them and copies in that example's `context/<role>/` files (or leaves
    them empty, for `03-no-context`).
 3. Runs `/council` headlessly and parses the full tool-call transcript.
-4. Checks: (a) exactly five subagent invocations, one per role; (b) every
-   subagent reply is valid JSON matching the 4-field schema; (c) the final
-   council JSON matches its schema; (d) `final_decision` is in the example's
+4. Checks: (a) all five roles are invoked at least once, with no unexpected
+   repeats (cto-agent/chro-agent may legitimately be invoked a second time,
+   for XREF-01's regulatory follow-up — never any other role, and never a
+   third time); (b) every subagent reply is valid JSON matching the 5-field
+   schema (`conditions` is an optional 6th field, added by a regulatory
+   follow-up reply that revises a recommendation); (c) the final council
+   JSON matches its schema; (d) `final_decision` is in the example's
    acceptable set.
 5. Restores the original `context/<role>/` contents (always, even on error).
+
+**Known transcript artifact:** the Claude Code CLI can emit an extra,
+phantom `Agent`/`Task` launch in a transcript when the CEO dispatches
+several subagents asynchronously in one batch — `subagent_type:
+"general-purpose"`, `description`/`prompt` both literally `"placeholder"`,
+and no result ever returned (confirmed live 2026-09-14, claude-code
+2.1.270, alongside two genuine async launches in the same
+`background_tasks_changed` event). This is a client-side quirk, not
+anything council.md or a subagent prompt causes. `parse_transcript` filters
+these out before check (a)/(b) ever see them (see
+`_is_placeholder_launch_artifact` in `validate.py`) — if a run still shows
+a 6th invocation after that filter, treat it as a real regression, not this
+artifact recurring.
 
 It repeats each example the requested number of times (default 3) and reports
 per-run pass/fail plus agreement across runs — e.g. whether all 3 runs landed
