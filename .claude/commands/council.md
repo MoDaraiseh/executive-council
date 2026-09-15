@@ -92,3 +92,5 @@ This council does not:
 ## Reminder
 
 This decision should be reviewed by a human before being acted on. When the decision is `approve` or `approve_with_conditions`, say so as a sentence within `reasoning` — do not add a separate field for it; the Output format above is exact.
+
+When you append that sentence (or write any multi-paragraph `reasoning` text), any line break inside the `reasoning` string must be the two-character JSON escape `\n`, never an actual line break typed into the string. Confirmed live 2026-09-15 (02-compliance-red-flag): writing a real line break right before this exact reminder sentence produced invalid JSON and broke the whole reply. If in doubt, write `reasoning` as a single unbroken line with no paragraph breaks at all — a wall of text there is always valid; a raw newline inside it is not.

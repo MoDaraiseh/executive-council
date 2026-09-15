@@ -91,6 +91,67 @@ COUNCIL_SUMMARY_KEYS = {"cfo", "coo", "cmo", "cto", "chro"}
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 
 
+def _escape_raw_control_chars_in_json_strings(text: str) -> str:
+    """Escapes literal C0 control characters (newline, tab, carriage return,
+    etc.) found INSIDE a JSON string literal, leaving everything else --
+    whitespace between tokens, code-fence formatting -- untouched.
+
+    Confirmed live 2026-09-15 (02-compliance-red-flag run 2): the CEO wrote
+    a literal, unescaped newline character inside the `reasoning` string
+    value -- right at the paragraph break before the mandatory human-review
+    reminder sentence council.md's Reminder section asks it to append --
+    instead of the JSON-escaped `\\n`. Strict json.loads() correctly rejects
+    raw control characters inside a string literal, so this repairs only
+    that specific mechanical mistake (an actual Enter keystroke where an
+    escape sequence belonged) rather than silently accepting some other,
+    genuinely different kind of malformed JSON.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+            elif ch == "\\":
+                out.append(ch)
+                escaped = True
+            elif ch == '"':
+                out.append(ch)
+                in_string = False
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            elif ord(ch) < 0x20:
+                out.append(f"\\u{ord(ch):04x}")
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+    return "".join(out)
+
+
+def _try_parse_json(candidate: str):
+    """json.loads(), retrying once with raw-control-character repair if the
+    first attempt fails specifically on an embedded control character.
+    Returns (parsed_dict_or_None, error_message_or_None)."""
+    try:
+        return json.loads(candidate), None
+    except json.JSONDecodeError as e:
+        if "Invalid control character" not in str(e):
+            return None, e
+        try:
+            return json.loads(_escape_raw_control_chars_in_json_strings(candidate)), None
+        except json.JSONDecodeError as e2:
+            return None, e2
+
+
 def extract_json(text: str):
     """Best-effort extraction of a JSON object from model output that may be
     wrapped in a ```json fence or have leading/trailing prose. Returns
@@ -101,19 +162,18 @@ def extract_json(text: str):
     # Strip a wrapping code fence if present.
     if candidate.startswith("```"):
         candidate = _CODE_FENCE_RE.sub("", candidate).strip()
-    try:
-        return json.loads(candidate), None
-    except json.JSONDecodeError:
-        pass
+    parsed, err = _try_parse_json(candidate)
+    if parsed is not None:
+        return parsed, None
     # Fall back to the first {...} block found, in case of stray prose.
     start = candidate.find("{")
     end = candidate.rfind("}")
     if start != -1 and end != -1 and end > start:
         snippet = candidate[start : end + 1]
-        try:
-            return json.loads(snippet), None
-        except json.JSONDecodeError as e:
-            return None, f"could not parse extracted JSON block: {e}"
+        parsed, err = _try_parse_json(snippet)
+        if parsed is not None:
+            return parsed, None
+        return None, f"could not parse extracted JSON block: {err}"
     return None, "no JSON object found in text"
 
 
@@ -1196,6 +1256,54 @@ def build_placeholder_artifact_transcript():
     return "\n".join(lines)
 
 
+def build_raw_control_char_council_reply_transcript():
+    """Otherwise well-formed transcript, but the final council JSON's
+    `reasoning` string contains a literal, unescaped newline character
+    (not the two-character `\\n` escape) -- the exact real failure mode
+    confirmed live 2026-09-15 (02-compliance-red-flag run 2): the model
+    wrote an actual line break right before the mandatory human-review
+    reminder sentence instead of JSON-escaping it. Must still parse
+    correctly (check (c) passes) once _escape_raw_control_chars_in_json_strings
+    repairs it -- proves the harness recovers this specific mechanical
+    mistake instead of failing the whole run on it."""
+
+    # Built by hand, not json.dumps(), which would never reproduce this bug
+    # (it always escapes control characters correctly).
+    council_reply_with_raw_newline = (
+        '{\n'
+        '  "final_decision": "reject",\n'
+        '  "confidence": "high",\n'
+        '  "regulatory_context_consulted": false,\n'
+        '  "council_summary": {\n'
+        '    "cfo": { "recommendation": "reject", "confidence": "high" },\n'
+        '    "coo": { "recommendation": "reject", "confidence": "high" },\n'
+        '    "cmo": { "recommendation": "reject", "confidence": "high" },\n'
+        '    "cto": { "recommendation": "reject", "confidence": "high" },\n'
+        '    "chro": { "recommendation": "reject", "confidence": "high" }\n'
+        '  },\n'
+        '  "key_disagreements": [],\n'
+        '  "reasoning": "The list must not be used without re-confirmed consent.\n'
+        '\n'
+        'This decision should be reviewed by a human before being acted on."\n'
+        '}'
+    )
+
+    lines = []
+    tool_ids = {}
+    assistant_content = []
+    for agent in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]:
+        tid = f"toolu_{agent}"
+        tool_ids[agent] = tid
+        assistant_content.append(_make_task_use_block(tid, agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+    for agent, tid in tool_ids.items():
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply_with_raw_newline}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply_with_raw_newline}))
+    return "\n".join(lines)
+
+
 def self_test() -> bool:
     ok = True
 
@@ -1323,6 +1431,24 @@ def self_test() -> bool:
     else:
         print(f"  FAIL (harness must not trust the self-reported field over the actual "
               f"transcript): {result}")
+        ok = False
+
+    print("Self-test 10: council JSON with a literal, unescaped newline inside the "
+          "reasoning string (not the \\n escape) should still parse and pass check (c) -- "
+          "the exact real 02-compliance-red-flag run 2 failure...")
+    raw_control_char_raw = build_raw_control_char_council_reply_transcript()
+    task_calls, final_text = parse_transcript(raw_control_char_raw)
+    result = evaluate_run(
+        task_calls,
+        final_text,
+        {"acceptable_final_decisions": ["reject"], "expected_regulatory_context_consulted": False},
+        raw_stdout=raw_control_char_raw,
+    )
+    if result["all_pass"] and result["checks"]["c_council_schema_valid"] is True:
+        print("  PASS (raw control character inside a JSON string literal repaired and parsed)")
+    else:
+        print(f"  FAIL (harness should repair a literal newline inside a JSON string value, "
+              f"not fail the whole run on it): {result}")
         ok = False
 
     return ok
