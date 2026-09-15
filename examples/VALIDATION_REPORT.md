@@ -459,6 +459,80 @@ JSON" cto-agent reply (cause not isolated); `02` run 2 failed check (c) on
 unescaped literal newline/tab inside a long `reasoning` string — a model
 JSON-formatting slip, not a jurisdiction or schema-design issue).
 
+## Two parse failures root-caused, 2026-09-15
+
+The two unrelated issues flagged at the end of the previous section were
+root-caused against the actual raw output that failed to parse, not a
+summary. Confirmed genuinely unrelated, not two instances of one bug:
+
+**01-clear-approve run 2, cto-agent "invalid JSON":** not a JSON-formatting
+bug. The raw `result_text` for cto-agent's regulatory-followup call was
+prose — a clarifying question ("Can you clarify whether the actual
+operating jurisdiction for this proposal is Saudi Arabia? ... my
+assessment would become approve_with_conditions") — with no JSON block at
+all. `regulatory_bash_query_invoked()` confirms this is the same run where
+the CEO incorrectly ran the saudi-law-tracker query on `jurisdiction:
+unspecified` (the already-tracked, still-open jurisdiction-gate issue);
+cto-agent, on receiving that self-contradictory follow-up, asked a
+clarifying question instead of completing its schema. A downstream
+cascade, not an independent bug. Fix: `cto-agent.md`/`chro-agent.md`'s
+Output format sections now say explicitly that a jurisdiction/regulatory-
+data contradiction belongs inside `key_risks` as a sentence, never as a
+prose question replacing the required JSON reply — an uncertain
+structured answer is always required, an unstructured question never
+substitutes for one.
+
+**02-compliance-red-flag run 2, council-level parse failure:** a genuine,
+unrelated JSON-escaping bug (`regulatory_context_consulted: false`, no
+Bash call in that run — nothing to do with jurisdiction). Reproduced
+`extract_json`'s exact fence-stripping and pinpointed the byte offset the
+parser reported (`Invalid control character at: ... char 3529`): the model
+wrote a literal, unescaped newline character inside the `reasoning` string
+value, exactly at the paragraph break before the mandatory human-review
+reminder sentence, instead of the JSON-escaped `\n\n`. Fix, two layers:
+(a) council.md's Reminder section now says explicitly that any line break
+inside `reasoning` must be the `\n` escape, never an actual line break;
+(b) the real fix — `extract_json()` now retries with a new
+`_escape_raw_control_chars_in_json_strings()` repair (walks the candidate
+string tracking JSON string-literal state character by character, escaping
+any raw control character found inside one) whenever the first parse
+attempt fails specifically with "Invalid control character". Verified
+against the real captured failing transcript before writing a self-test:
+recovers `final_decision: reject` with `reasoning` intact.
+
+Self-test 10 (a hand-built fixture with a genuinely embedded raw newline —
+`json.dumps()` would never reproduce this bug, since it always escapes
+correctly) proves the repair holds. 10/10 self-tests pass.
+
+**Fresh live `--runs 3` on both examples, evidence not summary:**
+
+| Example | Run | (b) subagent schema | (c) council schema | (e) regulatory consulted | final_decision |
+|---|---|---|---|---|---|
+| 01-clear-approve | 1 | PASS | PASS | FAIL (Bash invoked) | approve_with_conditions |
+| 01-clear-approve | 2 | PASS | PASS | FAIL (Bash invoked) | approve_with_conditions |
+| 01-clear-approve | 3 | PASS | PASS | FAIL (Bash invoked) | approve_with_conditions |
+| 02-compliance-red-flag | 1 | PASS | PASS | PASS | reject |
+| 02-compliance-red-flag | 2 | PASS | PASS | PASS | reject |
+| 02-compliance-red-flag | 3 | PASS | PASS | PASS | reject |
+
+Both parse-failure fixes hold: zero recurrences of either failure mode
+across this fresh 6-run batch (was 1/3 each in the prior batch). Directly
+confirmed the schema fix works as intended, not just by absence of
+failure: run 3's cto-agent regulatory-followup call now returns valid JSON
+folding the identical jurisdictional-contradiction concern into
+`key_risks` ("Jurisdictional contradiction: proposal is marked
+'jurisdiction: unspecified' but Saudi Arabia labor law regulatory context
+has been provided...") instead of breaking schema with a question.
+
+**Not fixed here, and not conflated with the two parse failures above:**
+`01`'s own check (e) was 0/3 in this same batch — worse than the 1/9
+reported previously. This is the pre-existing, already-tracked, still-open
+jurisdiction-gate reliability issue (prompt-enforced, not fully
+code-deterministic — see the "Deterministic jurisdiction gate" section
+above), not a new regression from this fix and not something this task
+was scoped to re-solve. EC-02 remains open on that basis; only the two
+distinct parse failures are closed by this fix.
+
 ## Bottom line
 
 Checks (a) fan-out, (b) subagent schema, and (c) council schema pass on
