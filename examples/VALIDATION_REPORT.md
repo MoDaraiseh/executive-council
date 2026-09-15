@@ -299,30 +299,61 @@ an 8th case (`build_unjustified_regulatory_consult_transcript`) proving it
 fails exactly this scenario even when (a)-(d) all pass. All 8 self-tests
 pass as of this commit.
 
+## Re-run after the session usage limit reset, 2026-09-15 16:56
+
+A fresh full `validate.py --runs 3` across all three examples, run after
+the earlier usage-limit block cleared:
+
+- **Issue 1 (extra fields): confirmed fixed.** `01-clear-approve` and
+  `02-compliance-red-flag` — 6/6 runs, zero extra fields, checks (b)/(c)
+  clean across the board. The strengthened Output format wording (naming
+  the five specific recurring offenders) held this time.
+- **Issue 2 (jurisdiction): still failing, 3/3.** All three fresh
+  `03-no-context` runs again set `regulatory_context_consulted: true` on
+  a decision that states no jurisdiction anywhere, caught correctly by
+  check (e) in all three. The specific mechanism this time: CHRO's own
+  reply correctly hedged ("KSA Saudization/Nitaqat implications *if*
+  operations are in Saudi Arabia"), but the CEO still ran the
+  saudi-law-tracker query off that hedge, and CHRO's *revised* answer
+  (after seeing the real regulatory data the query returned) shifted to
+  `approve_with_conditions` while its own text admitted the KSA-
+  jurisdiction premise underneath that revision was never confirmed.
+  `final_decision` still nets to `insufficient_data` in all 3 runs only
+  because CFO/COO/CMO's unanimous `insufficient_data` is independently a
+  hard stop in the decision logic — the process defect (a live query
+  spent, and a subagent's confidence shifted, on a jurisdiction nobody
+  ever stated) is real regardless of the label. This is the fourth
+  distinct manifestation of the same underlying behavior surviving a
+  fourth escalating, root-cause-targeted fix. Recommendation: treat check
+  (e) as the durable enforcement layer for this specific failure rather
+  than continuing to chase it with prompt wording — it has caught the
+  bug correctly in every batch tried (4/4) regardless of which exact
+  phrasing triggered it that time.
+
 ## Known open items (not closed)
 
-- **Issue 2 is caught, not eliminated.** The mechanical check (e) reliably
-  flags every occurrence found so far, but the underlying CEO-synthesis
-  behavior (misreading a subagent's own "I can't assess this, jurisdiction
-  unstated" as a real signal to consult) was not fixed by any prompt
-  change tried. Re-running `03-no-context --runs 3` after the
-  cfo/cto/chro-agent.md fix, both completed runs still triggered the
-  regulatory step; needs either a further council.md fix targeting this
-  specific misreading pattern, or acceptance that check (e) is the
-  durable enforcement layer here rather than the prompt.
-- **Issue 1's strengthened wording is unverified.** The offender-naming
-  addition to `council.md`'s Output format section was made after the
-  last full 9-run batch (which predates it and showed 6/9, 3 different
-  invented fields across `01-clear-approve` and `03-no-context`). A fresh
-  9-run confirmation is needed before claiming 0 extra fields.
-- **Claude Code session usage limit hit mid-verification**, resetting
-  3:40pm Asia/Riyadh — blocked further live CLI runs for the remainder of
-  this session. The run-3 "failure" this produced (non-JSON final result,
-  literally "You've hit your session limit") is an infrastructure
-  artifact, not a new prompt or harness bug, and is not counted as
-  evidence either way for Issue 2.
-- **EC-02 is not being proposed closed.** Both issues above need a clean
-  re-run once the usage limit resets before that proposal is credible.
+- **Issue 1 is resolved and confirmed** (see the 16:56 re-run above):
+  6/6 runs on the other two examples, zero extra fields.
+- **Issue 2 is caught, not eliminated.** Confirmed again in the 16:56
+  re-run: 3/3 fresh runs still triggered the regulatory step on an
+  unestablished jurisdiction, the fourth distinct manifestation to survive
+  a root-cause-targeted fix. The mechanical check (e) has now caught it
+  correctly in 4/4 batches regardless of the exact mechanism each time.
+  Recommendation: rely on check (e) as the durable guard for this specific
+  failure mode rather than continuing to chase it with prompt wording —
+  each fix has changed *how* the CEO gets there, not *whether* it gets
+  there.
+- **Claude Code session usage limit hit mid-verification** during the
+  batch before the 16:56 re-run (reset 3:40pm Asia/Riyadh) — the run-3
+  "failure" it produced (non-JSON final result, literally "You've hit your
+  session limit") was an infrastructure artifact, not a new bug, and is
+  not counted as evidence either way for Issue 2 (the 16:56 re-run,
+  after reset, supersedes it with 3 clean completions).
+- **EC-02 is not being proposed closed.** Issue 1 is resolved; Issue 2's
+  underlying behavior remains open, mitigated only by check (e) rather
+  than eliminated at the prompt level. Whether that mechanical guard is
+  an acceptable stopping point, or a code-level block is worth building
+  instead of a fifth prompt attempt, needs a decision.
 
 ## Bottom line
 
