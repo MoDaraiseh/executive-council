@@ -571,6 +571,38 @@ def evaluate_run(task_calls, final_text, expected: dict):
             f"final_decision {result['final_decision']!r} not in acceptable set {sorted(acceptable)}"
         )
 
+    # (e) regulatory_context_consulted matches expected, when an example
+    # declares one. This exists because council.md's own prompt-level
+    # instructions telling the CEO not to assume a Saudi jurisdiction from
+    # an unstated location proved unreliable in practice: three escalating
+    # rewordings (never resolve an ambiguous phrase into a real place ->
+    # a two-part jurisdiction/subject-matter gate -> a mandatory "write down
+    # a literal quote or admit jurisdiction is unestablished" checkpoint)
+    # all failed the same live 03-no-context re-test, with the CEO still
+    # asserting "this plainly touches Saudi regulatory territory" and
+    # setting regulatory_context_consulted: true off nothing but generic
+    # labor/tax/licensing language -- confirmed 2026-09-15 across 4
+    # consecutive fresh 3-run batches. The final_decision label alone
+    # doesn't catch this: 03-no-context still reliably lands on
+    # insufficient_data because the empty context/ folders are independently
+    # sufficient for that outcome, so a passing (d) can silently coexist
+    # with the CEO having fabricated a jurisdiction and (per run 3 of the
+    # last batch) let it sway CHRO to approve_with_conditions. This check
+    # makes that failure visible instead of relying on the final label.
+    expected_regulatory = expected.get("expected_regulatory_context_consulted")
+    if expected_regulatory is not None and council_parsed is not None:
+        actual_regulatory = council_parsed.get("regulatory_context_consulted")
+        e_ok = actual_regulatory == expected_regulatory
+        result["checks"]["e_regulatory_consulted_expected"] = e_ok
+        if not e_ok:
+            result["errors"].append(
+                f"regulatory_context_consulted was {actual_regulatory!r}, expected {expected_regulatory!r} "
+                "-- decision.md/context/ for this example contain no jurisdiction-establishing detail, "
+                "so the regulatory step should never fire (see council.md step 3a)"
+            )
+    else:
+        result["checks"]["e_regulatory_consulted_expected"] = None
+
     result["all_pass"] = all(v for v in result["checks"].values() if v is not None) and result["checks"]["d_final_decision_expected"] is not False
 
     return result
@@ -657,8 +689,8 @@ def print_report(all_results: list[dict]) -> bool:
         summary = summarize(ex)
         print(f"## {ex['example']}\n")
         print(f"Expected final_decision in: {ex['expected'].get('acceptable_final_decisions')}\n")
-        print("| run | (a) all 5 roles called | (a) repeats legitimate | (b) subagent schema | (c) council schema | (d) matches expected | final_decision | overall |")
-        print("|---|---|---|---|---|---|---|---|")
+        print("| run | (a) all 5 roles called | (a) repeats legitimate | (b) subagent schema | (c) council schema | (d) matches expected | (e) regulatory consulted | final_decision | overall |")
+        print("|---|---|---|---|---|---|---|---|---|")
         for r in ex["runs"]:
             checks = r.get("checks", {})
             def mark(v):
@@ -674,6 +706,7 @@ def print_report(all_results: list[dict]) -> bool:
                 f"| {r['run']} | {mark(checks.get('a_five_invocations'))} | "
                 f"{mark(checks.get('a_five_distinct_roles'))} | {mark(checks.get('b_subagent_schema_valid'))} | "
                 f"{mark(checks.get('c_council_schema_valid'))} | {mark(checks.get('d_final_decision_expected'))} | "
+                f"{mark(checks.get('e_regulatory_consulted_expected'))} | "
                 f"{r.get('final_decision')} | {'PASS' if row_pass else 'FAIL'} |"
             )
             if r.get("errors"):
@@ -738,6 +771,88 @@ def build_good_transcript():
         },
         "key_disagreements": [],
         "reasoning": "all five agents agreed",
+    })
+
+    lines = []
+    tool_ids = {}
+    assistant_content = []
+    for agent in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]:
+        tid = f"toolu_{agent}"
+        tool_ids[agent] = tid
+        assistant_content.append(_make_task_use_block(tid, agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+    for agent, tid in tool_ids.items():
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
+    return "\n".join(lines)
+
+
+def build_extra_council_field_transcript():
+    """Otherwise well-formed transcript, but the final council JSON has an
+    invented extra field -- the real failure mode confirmed live 2026-09-15
+    (human_review_required, conditions_for_approval,
+    regulatory_sources_referenced all appeared across different runs,
+    despite council.md never defining any of them). Must fail check (c)
+    even though every other check would otherwise pass, proving the extra-
+    key check can't silently regress."""
+
+    council_reply = json.dumps({
+        "final_decision": "approve",
+        "confidence": "high",
+        "regulatory_context_consulted": False,
+        "council_summary": {
+            "cfo": {"recommendation": "approve", "confidence": "high"},
+            "coo": {"recommendation": "approve", "confidence": "high"},
+            "cmo": {"recommendation": "approve", "confidence": "high"},
+            "cto": {"recommendation": "approve", "confidence": "high"},
+            "chro": {"recommendation": "approve", "confidence": "high"},
+        },
+        "key_disagreements": [],
+        "reasoning": "all five agents agreed",
+        "human_review_required": "Yes, before acting on this decision.",
+    })
+
+    lines = []
+    tool_ids = {}
+    assistant_content = []
+    for agent in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]:
+        tid = f"toolu_{agent}"
+        tool_ids[agent] = tid
+        assistant_content.append(_make_task_use_block(tid, agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+    for agent, tid in tool_ids.items():
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
+    return "\n".join(lines)
+
+
+def build_unjustified_regulatory_consult_transcript():
+    """Otherwise well-formed transcript for a no-jurisdiction-stated scenario,
+    but the CEO set regulatory_context_consulted: True anyway -- the real
+    failure mode confirmed live 2026-09-15 on 03-no-context across 4
+    consecutive fresh 3-run batches, surviving three escalating council.md
+    prompt rewordings. Must fail check (e) even though every other check
+    (including (d), since insufficient_data is still reached) would
+    otherwise pass -- final_decision alone can't catch this."""
+
+    council_reply = json.dumps({
+        "final_decision": "insufficient_data",
+        "confidence": "high",
+        "regulatory_context_consulted": True,
+        "council_summary": {
+            "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "coo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
+            "cto": {"recommendation": "insufficient_data", "confidence": "high"},
+            "chro": {"recommendation": "insufficient_data", "confidence": "high"},
+        },
+        "key_disagreements": [],
+        "reasoning": "This also plainly touches Saudi regulatory territory (labor law/Nitaqat), "
+                     "so I checked the saudi-law-tracker for relevant sectors.",
     })
 
     lines = []
@@ -989,6 +1104,39 @@ def self_test() -> bool:
         else:
             print(f"  FAIL (phantom launch was filtered but the run still failed a check): {result}")
             ok = False
+
+    print("Self-test 7: council JSON with an invented extra field "
+          "(human_review_required) should fail check (c)...")
+    task_calls, final_text = parse_transcript(build_extra_council_field_transcript())
+    result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["approve"]})
+    if result["checks"]["c_council_schema_valid"] is False and not result["all_pass"]:
+        print("  PASS (extra top-level field correctly detected)")
+    else:
+        print(f"  FAIL (harness should reject any council JSON field beyond COUNCIL_SCHEMA_FIELDS): {result}")
+        ok = False
+
+    print("Self-test 8: regulatory_context_consulted: true on a no-jurisdiction "
+          "example should fail check (e) even though (a)-(d) all pass...")
+    task_calls, final_text = parse_transcript(build_unjustified_regulatory_consult_transcript())
+    result = evaluate_run(
+        task_calls,
+        final_text,
+        {"acceptable_final_decisions": ["insufficient_data"], "expected_regulatory_context_consulted": False},
+    )
+    if (
+        result["checks"]["e_regulatory_consulted_expected"] is False
+        and not result["all_pass"]
+        and result["checks"]["a_five_invocations"]
+        and result["checks"]["b_subagent_schema_valid"]
+        and result["checks"]["c_council_schema_valid"]
+        and result["checks"]["d_final_decision_expected"]
+    ):
+        print("  PASS (unjustified regulatory consult correctly detected, "
+              "despite final_decision itself being the expected insufficient_data)")
+    else:
+        print(f"  FAIL (harness should catch a jurisdiction-unjustified regulatory consult "
+              f"regardless of final_decision): {result}")
+        ok = False
 
     return ok
 

@@ -2,5 +2,6 @@
   "example": "03-no-context",
   "description": "None of the five context folders contain anything beyond (at most) the standing README template — no real financial, operational, market, technical, or people data is provided for a decision this size. Every subagent should have too little to go on.",
   "acceptable_final_decisions": ["insufficient_data"],
-  "notes": "This is the one example where a fully empty context/<role>/ folder is staged for the run (the standing README.md is removed for the duration of the run and restored afterward), directly exercising each agent's literal instruction: 'if the folder is empty, return insufficient_data.'"
+  "expected_regulatory_context_consulted": false,
+  "notes": "This is the one example where a fully empty context/<role>/ folder is staged for the run (the standing README.md is removed for the duration of the run and restored afterward), directly exercising each agent's literal instruction: 'if the folder is empty, return insufficient_data.' decision.md deliberately states no country/region/city, so regulatory_context_consulted must be false per council.md step 3a -- the CEO must not assume Saudi jurisdiction from silence just because saudi-law-tracker is the only regulatory tool available. Confirmed via live re-test (2026-09-15) that the CEO does this anyway despite explicit prompt instructions; this expectation exists to catch it mechanically since the final_decision label alone doesn't (an empty context/ folder forces insufficient_data regardless of the jurisdiction bug)."
 }

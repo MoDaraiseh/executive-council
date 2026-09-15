@@ -206,6 +206,124 @@ the exact phantom shape) proving the filtered run now passes every check;
 re-scoring all 9 real transcripts from the `20260914-220658` run against
 the fix confirms **9/9 now pass**, `03-no-context` run 2 included.
 
+## Fresh live re-run (not a re-score), 2026-09-15: 5/9, two new real issues
+
+A genuinely fresh, live `validate.py --runs 3` across all three examples —
+not a re-score of the transcripts above — did **not** confirm the 9/9
+result. It found **5/9** passing, with two distinct, real, reproducible
+issues, neither a harness bug:
+
+**Issue 1 — recurring invented extra council/subagent fields.** Across
+different runs, the final council JSON or a subagent reply added fields
+never defined anywhere: `human_review_required`, `human_review_note`,
+`conditions_for_approval`, `regulatory_sources_referenced`,
+`next_steps_before_resubmission`. Check (c)/(b)'s pre-existing extra-key
+test (`obj.keys() - SCHEMA_FIELDS`) caught every one of them correctly —
+this was never a harness gap, only a prompt-following gap. A first fix
+(clarifying where the human-review reminder belongs) reduced but did not
+eliminate it; a second, blunter fix — "Return ONLY the fields listed
+above. Do not add any additional fields, even if they seem helpful or
+relevant," later strengthened to name the five specific recurring
+offenders and say plainly where each one's content belongs instead — was
+added to `council.md`'s Output format section. `--self-test` gained a
+7th case (`build_extra_council_field_transcript`, confirming
+check (c) fails a `human_review_required` field). A full 9-run
+confirmation of the strengthened wording is still pending (see Known open
+items below) — the last full 9-run number on record (6/9) predates it.
+
+**Issue 2 — unjustified Saudi jurisdiction assumption.** `03-no-context`'s
+decision.md never states a country, region, or city. Across 3 fresh runs,
+the CEO nonetheless treated "the northeast market" as Saudi Arabia's
+Northern Borders/Qassim/Najran/Asir region, ran the XREF-01 regulatory
+query on that invented basis, and in 2/3 runs the resulting real MHRSD
+data swayed CHRO's verdict to `reject` or `approve_with_conditions` —
+final_decision still landed on `insufficient_data` in all 3 (the empty
+`context/` folders alone are sufficient for that), so the label alone
+didn't surface the bug; reading the actual reasoning text did.
+
+Four escalating fixes were tried, each addressing the mechanism the
+previous one's live re-test exposed, and none fully eliminated the
+behavior:
+
+1. Reworded `03-no-context/decision.md` to remove "the northeast market"
+   entirely ("expand our market presence"). Live re-test: `northeast`
+   disappeared from every transcript, but `Saudi`/`Saudization`/`Nitaqat`
+   remained heavy in all 3 runs — the CEO was defaulting the *whole
+   company* to Saudi Arabia even with zero geography mentioned anywhere,
+   not just resolving an ambiguous phrase.
+2. Added a two-part jurisdiction/subject-matter gate to `council.md` step
+   3 ("silence means unknown, not Saudi Arabia by default... the fact that
+   this tooling only has a Saudi regulatory database is not evidence
+   about the company's jurisdiction"). Live re-test: unchanged —
+   `regulatory_context_consulted: true` in all 3 runs, fabricated regions
+   reappeared in one of them; the CEO's own text still asserted "this
+   plainly touches Saudi regulatory territory" without ever engaging the
+   new gate.
+3. Replaced the gate with a mandatory quote-forcing checkpoint (state
+   `Jurisdiction: Saudi Arabia, established by: "<exact quote>"` or
+   `Jurisdiction: not established`, before reasoning about regulatory
+   tagging at all). Live re-test: the CEO never even produced the
+   required checkpoint sentence — ignored it outright, same
+   `regulatory_context_consulted: true` in all 3 runs.
+4. Found the actual root cause: it was never in `council.md`.
+   `cfo-agent.md`, `cto-agent.md`, and `chro-agent.md` each hardcode an
+   unconditional "This council operates under Saudi Arabia (KSA) ...
+   regulation" statement in their own "Local context" section, independent
+   of anything any decision states — a standing design assumption three
+   rounds of council.md edits could never have overridden. Reworded all
+   three to make KSA-specific guidance (zakat/VAT/ZATCA, PDPL/NCA/ECC,
+   Saudization/Nitaqat/EOSB) conditional on the decision or `context/`
+   actually establishing Saudi Arabia, explicit that silence doesn't. Live
+   re-test: **CHRO's own reply improved correctly** — it now says
+   "Jurisdiction unstated — cannot assess regulatory exposure (Saudization,
+   EOSB, etc.)" as a `key_risk`, rather than asserting these as confirmed
+   facts. But the CEO synthesis step then *misread that explicit
+   admission of unknowability* as CHRO having "flagged" a real Saudi risk
+   ("as CHRO flagged, so I'll run the saudi-law-tracker query"), and ran
+   the regulatory step anyway in 2 of the 2 runs that completed (the 3rd
+   hit a Claude Code session usage limit mid-run, an infrastructure
+   artifact unrelated to any of this, not a 3rd data point either way).
+
+Given four escalating, root-cause-driven prompt fixes have each narrowed
+the failure differently without eliminating it, prompt wording alone is
+not treated as a reliable enough guarantee here. Added mechanical check
+**(e) regulatory_context_consulted matches expected** to
+`evaluate_run()`/`print_report()`, driven by a new
+`expected_regulatory_context_consulted` key in `expected.json` (set to
+`false` for `03-no-context`, absent — meaning "don't check" — for the
+other two examples where a regulatory consult can be legitimate). Unlike
+the label-only check (d), this fires regardless of which specific
+mechanism produces the false assumption, and regardless of whether
+`final_decision` happens to still be correct by luck. `--self-test` gained
+an 8th case (`build_unjustified_regulatory_consult_transcript`) proving it
+fails exactly this scenario even when (a)-(d) all pass. All 8 self-tests
+pass as of this commit.
+
+## Known open items (not closed)
+
+- **Issue 2 is caught, not eliminated.** The mechanical check (e) reliably
+  flags every occurrence found so far, but the underlying CEO-synthesis
+  behavior (misreading a subagent's own "I can't assess this, jurisdiction
+  unstated" as a real signal to consult) was not fixed by any prompt
+  change tried. Re-running `03-no-context --runs 3` after the
+  cfo/cto/chro-agent.md fix, both completed runs still triggered the
+  regulatory step; needs either a further council.md fix targeting this
+  specific misreading pattern, or acceptance that check (e) is the
+  durable enforcement layer here rather than the prompt.
+- **Issue 1's strengthened wording is unverified.** The offender-naming
+  addition to `council.md`'s Output format section was made after the
+  last full 9-run batch (which predates it and showed 6/9, 3 different
+  invented fields across `01-clear-approve` and `03-no-context`). A fresh
+  9-run confirmation is needed before claiming 0 extra fields.
+- **Claude Code session usage limit hit mid-verification**, resetting
+  3:40pm Asia/Riyadh — blocked further live CLI runs for the remainder of
+  this session. The run-3 "failure" this produced (non-JSON final result,
+  literally "You've hit your session limit") is an infrastructure
+  artifact, not a new prompt or harness bug, and is not counted as
+  evidence either way for Issue 2.
+- **EC-02 is not being proposed closed.** Both issues above need a clean
+  re-run once the usage limit resets before that proposal is credible.
+
 ## Bottom line
 
 Checks (a) fan-out, (b) subagent schema, and (c) council schema pass on
@@ -219,3 +337,10 @@ original record. The two sections above address three further issues found
 in later re-verification: the XREF-01 follow-up path actually firing for
 the first time (real regulatory-context data now exists), and a harmless
 but previously-uncounted CLI transcript artifact.
+
+**This 9/9 result is superseded by the "Fresh live re-run" section above.**
+A genuinely fresh execution (not a re-score of these same transcripts)
+later found 5/9, and two of the fixes for it are still unverified pending
+the session usage limit reset. Treat the 9/9 figure in this section as a
+historical record of that specific re-score, not as the current state of
+the example suite.
