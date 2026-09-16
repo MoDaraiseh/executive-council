@@ -73,6 +73,10 @@ SUBAGENT_ROLE_VALUES = {"cfo", "coo", "cmo", "cto", "chro"}
 # context and asks them to revise their recommendation -- the only agents
 # a real run can legitimately call more than once, and at most twice each.
 REGULATORY_FOLLOWUP_AGENTS = {"cto-agent", "chro-agent"}
+# Recognized Saudi-jurisdiction values, matching council.md step 1's own
+# definition exactly (case-insensitive, exact match only).
+RECOGNIZED_SAUDI_JURISDICTIONS = {"ksa", "saudi arabia"}
+_JURISDICTION_FIELD_RE = re.compile(r"^\s*jurisdiction\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 COUNCIL_SCHEMA_FIELDS = {
     "final_decision",
     "confidence",
@@ -464,8 +468,26 @@ def parse_transcript(raw_stdout: str):
 
 
 def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
-    """Scans the raw transcript directly for a Bash tool_use invoking the
-    saudi-law-tracker query CLI (council.md step 5's regulatory step).
+    """Scans the raw transcript directly for a Bash tool_use that invoked
+    the saudi-law-tracker query CLI (council.md step 5's regulatory step)
+    AND actually returned real data -- an attempt that hard-errored (e.g.
+    --disallowedTools "Bash" makes the tool absent entirely; the CLI
+    returns `is_error: true`, "No such tool available: Bash...") never
+    reached the real query and returned nothing a subagent could act on, so
+    it does not count as the regulatory step having run. Confirmed live
+    2026-09-16 (01-clear-approve): with the code-level jurisdiction gate in
+    place, the CEO still emitted a Bash tool_use naming the query (its own
+    prior turns/training make it try even when the tool isn't listed for
+    this session), but the tool_result was
+    `<tool_use_error>Error: No such tool available: Bash. Bash is disabled
+    for this session, in subagents as well as here.</tool_use_error>` with
+    `is_error: true` -- no data was ever returned, `regulatory_context_
+    consulted: false` was correctly self-reported, and the final decision
+    was reached on purely operational grounds with no Saudi-regulatory
+    content anywhere in it. Counting that attempt as "invoked" would be a
+    false positive on check (e): the gate worked, only the older
+    prompt-level detection heuristic needed updating to know the
+    difference between an attempt and an actual, data-returning call.
 
     This exists as a deliberate second signal, independent of the CEO's own
     self-reported `regulatory_context_consulted` field in the final council
@@ -479,6 +501,7 @@ def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
     an unestablished jurisdiction in 4/4 live batches despite four
     escalating prompt-only fixes).
     """
+    candidate_ids: set[str] = set()
     for line in raw_stdout.splitlines():
         line = line.strip()
         if not line:
@@ -487,17 +510,35 @@ def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(obj, dict) or obj.get("type") != "assistant":
+        if not isinstance(obj, dict):
             continue
-        content = (obj.get("message") or {}).get("content") or []
-        for block in content:
-            if not isinstance(block, dict):
+
+        if obj.get("type") == "assistant":
+            content = (obj.get("message") or {}).get("content") or []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use" or block.get("name") != "Bash":
+                    continue
+                command = (block.get("input") or {}).get("command") or ""
+                if "saudi-law-tracker" in command.lower() and block.get("id"):
+                    candidate_ids.add(block["id"])
+
+        elif obj.get("type") == "user" and candidate_ids:
+            content = (obj.get("message") or {}).get("content")
+            if not isinstance(content, list):
                 continue
-            if block.get("type") != "tool_use" or block.get("name") != "Bash":
-                continue
-            command = (block.get("input") or {}).get("command") or ""
-            if "saudi-law-tracker" in command.lower():
-                return True
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tid = block.get("tool_use_id")
+                if tid not in candidate_ids:
+                    continue
+                if block.get("is_error"):
+                    candidate_ids.discard(tid)  # attempted but hard-errored, no data returned
+                    continue
+                return True  # this candidate call actually returned real data
+
     return False
 
 
@@ -562,6 +603,35 @@ def stage_example(example_dir: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+def extract_jurisdiction_field(decision_text: str) -> str | None:
+    """Mechanically extracts the literal value of the first `jurisdiction:`
+    line in decision_text, via regex -- no LLM involved. Returns None if the
+    field is missing entirely (treated the same as an unrecognized value by
+    callers, per council.md step 1: "If the field is missing altogether,
+    treat it exactly as unspecified")."""
+    m = _JURISDICTION_FIELD_RE.search(decision_text)
+    return m.group(1) if m else None
+
+
+def is_recognized_saudi_jurisdiction(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in RECOGNIZED_SAUDI_JURISDICTIONS
+
+
+def compute_tool_flags(decision_text: str) -> tuple[str, str | None]:
+    """Returns (allowed_tools, disallowed_tools_or_None) for a headless
+    /council run, gated on decision_text's jurisdiction: field. Bash is
+    permitted only for a recognized Saudi jurisdiction -- see
+    run_council()'s comment for why this replaced trusting the CEO's own
+    prompt-level jurisdiction gate, and for why --disallowedTools (not
+    merely omitting Bash from --allowedTools) is the part that actually
+    works. A pure function so the gating decision itself is unit-testable
+    without mocking subprocess."""
+    jurisdiction = extract_jurisdiction_field(decision_text)
+    if is_recognized_saudi_jurisdiction(jurisdiction):
+        return "Agent,Task,Bash", None
+    return "Agent,Task", "Bash"
+
+
 def run_council(decision_text: str, claude_bin: str, skip_permissions: bool, timeout: int):
     prompt = f"/council {decision_text}"
     # The prompt is passed via stdin (input=prompt below), not as an inline
@@ -590,7 +660,44 @@ def run_council(decision_text: str, claude_bin: str, skip_permissions: bool, tim
         # "create unsafe agents" when it's used to spawn a nested claude
         # session -- --allowedTools isn't a blanket bypass, so it isn't
         # caught by that check.
-        cmd += ["--allowedTools", "Agent,Task,Bash"]
+        #
+        # Bash is permitted ONLY when decision_text's jurisdiction: field is
+        # a recognized Saudi value -- a code-level gate, not a prompt
+        # instruction the CEO can fail to follow. Five escalating prompt-only
+        # attempts at getting the CEO to self-gate the regulatory step on
+        # jurisdiction (never resolve an ambiguous phrase -> a two-part gate
+        # -> a quote-forcing checkpoint -> removing the hardcoded Saudi
+        # framing from cfo/cto/chro-agent.md -> a required jurisdiction:
+        # field read in council.md's own instructions) all failed some
+        # fraction of live runs, worsening to 0/3 in the batch that also
+        # showed it cascading into a cto-agent schema break (EC-02, see
+        # VALIDATION_REPORT.md).
+        #
+        # IMPORTANT, confirmed live 2026-09-16 by direct experiment, not
+        # assumed: simply leaving Bash out of --allowedTools does NOT deny
+        # it. A bare `claude -p` call with --allowedTools "Agent,Task" (no
+        # Bash) and a prompt explicitly instructing a Bash command still ran
+        # it successfully, with permission_denials: [] in the result -- this
+        # CLI's headless default (--permission-mode default, no
+        # --permission-prompts override) auto-approves a tool omitted from
+        # --allowedTools rather than denying it; --allowedTools is a
+        # pre-approval list, not an allowlist that excludes anything not on
+        # it. The mechanism that actually works, confirmed the same way: a
+        # second experiment adding --disallowedTools "Bash" made Bash
+        # disappear from the init event's own tool list entirely, and the
+        # model correctly reported it had no shell execution tool available
+        # rather than finding a workaround. So the gate here is
+        # --disallowedTools, not the absence of Bash from --allowedTools --
+        # this subsumes the prompt-level gate for this harness; council.md's
+        # own instructions and check (e) both stay in place as
+        # defense-in-depth (check (e) should now read as a permanent PASS
+        # for jurisdiction-unspecified examples specifically because the
+        # tool is structurally unavailable, not because the CEO chose
+        # correctly).
+        allowed_tools, disallowed_tools = compute_tool_flags(decision_text)
+        cmd += ["--allowedTools", allowed_tools]
+        if disallowed_tools:
+            cmd += ["--disallowedTools", disallowed_tools]
     try:
         proc = subprocess.run(
             cmd,
@@ -910,6 +1017,24 @@ def _make_bash_tool_use_block(tool_id, command='"C:\\Users\\darai_qtguapt\\saudi
     return {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": command}}
 
 
+def _make_bash_disabled_error_result(tool_id):
+    """The exact real tool_result confirmed live 2026-09-16 (01-clear-approve)
+    when --disallowedTools "Bash" is in effect and the CEO attempts the call
+    anyway -- an attempt, not an actual regulatory-data-returning call."""
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": "<tool_use_error>Error: No such tool available: Bash. Bash is disabled for this session, in subagents as well as here.</tool_use_error>",
+                "is_error": True,
+            }],
+        },
+    }
+
+
 def _good_subagent_reply(role: str) -> str:
     return json.dumps({
         "role": role,
@@ -1075,6 +1200,52 @@ def build_self_report_mismatch_transcript():
     # The query actually ran, contradicting the self-report above.
     lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]}}))
     lines.append(_fixture_line(_make_tool_result("toolu_bash1", '{"rows": []}')))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
+    return "\n".join(lines)
+
+
+def build_bash_attempted_but_disabled_transcript():
+    """The CEO attempts the regulatory Bash call despite --disallowedTools
+    "Bash" being in effect (jurisdiction: unspecified), and the tool hard-
+    errors with the exact real message confirmed live 2026-09-16
+    (01-clear-approve): "No such tool available: Bash. Bash is disabled for
+    this session..." with is_error: true. No real data is ever returned;
+    the CEO correctly self-reports regulatory_context_consulted: false and
+    reaches its decision on purely operational grounds. Must pass check (e)
+    -- an attempted-but-hard-errored call is not "the regulatory step ran,"
+    since nothing it could have returned ever reached any subagent."""
+
+    council_reply = json.dumps({
+        "final_decision": "approve_with_conditions",
+        "confidence": "medium",
+        "regulatory_context_consulted": False,
+        "council_summary": {
+            "cfo": {"recommendation": "approve", "confidence": "high"},
+            "coo": {"recommendation": "approve", "confidence": "high"},
+            "cmo": {"recommendation": "approve", "confidence": "high"},
+            "cto": {"recommendation": "approve", "confidence": "high"},
+            "chro": {"recommendation": "approve_with_conditions", "confidence": "high"},
+        },
+        "key_disagreements": ["CHRO alone flagged operational conditions (roster fragility, fatigue risk)"],
+        "reasoning": "The regulatory Bash step was attempted but the tool was unavailable for this "
+                     "session (jurisdiction: unspecified); proceeded without it and reached this "
+                     "decision on purely operational grounds.",
+    })
+
+    lines = []
+    tool_ids = {}
+    assistant_content = []
+    for agent in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]:
+        tid = f"toolu_{agent}"
+        tool_ids[agent] = tid
+        assistant_content.append(_make_task_use_block(tid, agent))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
+    for agent, tid in tool_ids.items():
+        role = agent[: -len("-agent")]
+        lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash_disabled")]}}))
+    lines.append(_fixture_line(_make_bash_disabled_error_result("toolu_bash_disabled")))
     lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
@@ -1449,6 +1620,59 @@ def self_test() -> bool:
     else:
         print(f"  FAIL (harness should repair a literal newline inside a JSON string value, "
               f"not fail the whole run on it): {result}")
+        ok = False
+
+    print("Self-test 11: jurisdiction: field extraction and the code-level Bash-gating "
+          "decision it drives (compute_tool_flags) -- no CLI invocation, pure logic. "
+          "Gate is --disallowedTools, not omission from --allowedTools -- confirmed live "
+          "2026-09-16 that omission alone does not actually deny a tool call...")
+    cases = [
+        ("jurisdiction: KSA\n\nProposal: text", "KSA", True, "Agent,Task,Bash", None),
+        ("jurisdiction: Saudi Arabia\n\nProposal: text", "Saudi Arabia", True, "Agent,Task,Bash", None),
+        ("jurisdiction: saudi arabia\n\nProposal: text", "saudi arabia", True, "Agent,Task,Bash", None),  # case-insensitive
+        ("jurisdiction: unspecified\n\nProposal: text", "unspecified", False, "Agent,Task", "Bash"),
+        ("jurisdiction: EU\n\nProposal: text", "EU", False, "Agent,Task", "Bash"),
+        ("Proposal: no jurisdiction line at all", None, False, "Agent,Task", "Bash"),  # missing field == unspecified
+        ("Jurisdiction:   KSA  \n\nProposal: text", "KSA", True, "Agent,Task,Bash", None),  # whitespace/case in the label
+    ]
+    jurisdiction_ok = True
+    for decision_text, expected_field, expected_recognized, expected_allowed, expected_disallowed in cases:
+        field = extract_jurisdiction_field(decision_text)
+        recognized = is_recognized_saudi_jurisdiction(field)
+        allowed, disallowed = compute_tool_flags(decision_text)
+        if (
+            field != expected_field
+            or recognized != expected_recognized
+            or allowed != expected_allowed
+            or disallowed != expected_disallowed
+        ):
+            jurisdiction_ok = False
+            print(f"  FAIL for {decision_text[:40]!r}: got field={field!r} recognized={recognized} "
+                  f"allowed={allowed!r} disallowed={disallowed!r}, expected field={expected_field!r} "
+                  f"recognized={expected_recognized} allowed={expected_allowed!r} disallowed={expected_disallowed!r}")
+    if jurisdiction_ok:
+        print("  PASS (all extraction/gating cases correct, including case-insensitivity, "
+              "whitespace tolerance, a missing field defaulting to unspecified, and Bash landing "
+              "in --disallowedTools rather than merely being left out of --allowedTools)")
+    else:
+        ok = False
+
+    print("Self-test 12: CEO attempts the regulatory Bash call but it hard-errors "
+          "(--disallowedTools \"Bash\" in effect) -- must pass check (e), since no real data "
+          "was ever returned; the exact real 01-clear-approve run 2 scenario...")
+    bash_disabled_raw = build_bash_attempted_but_disabled_transcript()
+    task_calls, final_text = parse_transcript(bash_disabled_raw)
+    result = evaluate_run(
+        task_calls,
+        final_text,
+        {"acceptable_final_decisions": ["approve", "approve_with_conditions"], "expected_regulatory_context_consulted": False},
+        raw_stdout=bash_disabled_raw,
+    )
+    if result["all_pass"] and result["checks"]["e_regulatory_consulted_expected"] is True:
+        print("  PASS (attempted-but-hard-errored Bash call correctly not counted as the "
+              "regulatory step having run)")
+    else:
+        print(f"  FAIL (an attempt that returned no real data should not fail check (e)): {result}")
         ok = False
 
     return ok

@@ -533,6 +533,97 @@ above), not a new regression from this fix and not something this task
 was scoped to re-solve. EC-02 remains open on that basis; only the two
 distinct parse failures are closed by this fix.
 
+## Jurisdiction gate replaced with a real code-level block, 2026-09-16
+
+The prompt-only jurisdiction gate's own reliability had degraded to 0/3 in
+the most recent batch, and finding #1 from the parse-failure investigation
+above showed it cascading into a real schema break (the CEO ran the query
+anyway, sending cto-agent contradictory data it didn't know how to
+reconcile, which broke its output schema). Asked to reconsider a
+PreToolUse hook versus a simpler code-level check; investigated whether
+the gate could move earlier in the pipeline, into a mechanical step
+outside the CEO's own reasoning entirely.
+
+**First attempt was wrong, caught by direct experiment before it shipped
+broadly.** The obvious-seeming fix — compute the jurisdiction from
+decision_text in `validate.py` and simply leave `Bash` out of
+`--allowedTools` for a non-Saudi jurisdiction — does NOT work. A direct,
+isolated test (`claude -p` with `--allowedTools "Agent,Task"`, a prompt
+explicitly instructing a Bash command) still ran the command successfully,
+with `permission_denials: []`. This CLI's headless default apparently
+auto-approves a tool omitted from `--allowedTools` rather than denying it;
+`--allowedTools` is a pre-approval list, not an exclusive allowlist.
+
+**The mechanism that actually works, confirmed the same way:**
+`--disallowedTools "Bash"`. A second direct experiment with that flag added
+made `Bash` disappear from the init event's own tool list entirely, and
+the model correctly reported it had no shell execution tool rather than
+finding a workaround. `validate.py` now computes `(allowed_tools,
+disallowed_tools)` from decision_text's `jurisdiction:` field
+(`compute_tool_flags()`) and passes `--disallowedTools "Bash"` whenever
+jurisdiction isn't a recognized Saudi value. This is genuine code
+enforcement — the CEO cannot invoke the tool regardless of its own
+reasoning, because the tool does not exist in what it's permitted to call
+for that run, not because it chose correctly.
+
+**Verified against the real live `/council` orchestration, not just the
+isolated experiment:** a smoke run on `03-no-context` confirmed `Bash` was
+absent from that real run's own init tool list. A smoke run on
+`01-clear-approve` (the example with the worst prior jurisdiction-gate
+failure rate) showed the CEO attempt the Bash call anyway (its own prior
+training/turns still "know" Bash generally exists) and get a hard error:
+`<tool_use_error>Error: No such tool available: Bash. Bash is disabled for
+this session, in subagents as well as here.</tool_use_error>`, `is_error:
+true`. No real data was ever returned; `regulatory_context_consulted:
+false` was correctly self-reported and the decision was reached on
+purely operational grounds.
+
+That attempted-but-hard-errored call was itself a new finding:
+`regulatory_bash_query_invoked()` (check (e)'s detector) originally counted
+any Bash tool_use naming the query as "invoked," regardless of whether it
+actually returned data — a false positive on exactly the run where the
+gate had just worked. Fixed to require a successful (non-`is_error`)
+tool_result before counting a call as real; self-test 12 proves an
+attempted-but-blocked call correctly still passes check (e).
+
+**Also discovered, live, in the fresh full batch after the fix:** the CEO
+tried to *circumvent* the restriction on one run by delegating the exact
+same Bash command to a `general-purpose` subagent via the Agent tool. That
+subagent's own toolset also lacked Bash ("disabled for this session, in
+subagents as well as here" — confirmed literally true, not just claimed),
+so no real data reached anyone through that path either, and check (e)
+correctly passed. This is a known, currently-non-triggered gap in
+`regulatory_bash_query_invoked()`'s own design (it only scans top-level
+`Bash` tool_use, not subagent-delegated attempts) — it didn't cause a false
+result here because the circumvention itself failed, not because the
+detector would have caught a successful one. Worth a fix if a future
+subagent type or session config ever does grant Bash, not urgent given
+`--disallowedTools` propagating to subagents held on the one attempt
+observed.
+
+**Fresh live `--runs 3` across all three examples, full per-run jurisdiction
+outcome (not just overall pass/fail):**
+
+| Example | Run | (e) regulatory consulted | Note |
+|---|---|---|---|
+| 01-clear-approve | 1 | PASS | |
+| 01-clear-approve | 2 | PASS (was FAIL pre-fix on this exact scenario) | `human_review_required` extra-field failure only, unrelated |
+| 01-clear-approve | 3 | PASS | |
+| 02-compliance-red-flag | 1 | PASS | |
+| 02-compliance-red-flag | 2 | PASS | |
+| 02-compliance-red-flag | 3 | PASS | |
+| 03-no-context | 1 | PASS | |
+| 03-no-context | 2 | PASS | |
+| 03-no-context | 3 | PASS (circumvention attempt correctly blocked) | phantom `general-purpose` task + extra `human_review_note` field, unrelated |
+
+**Check (e) is 9/9 across the full batch — the jurisdiction-gate failure
+mode is structurally eliminated**, not just less frequent. The two
+remaining failures in this batch (an extra top-level field on two separate
+runs, and a phantom subagent-delegation attempt with invalid JSON) are the
+pre-existing, already-tracked extra-field issue and a new placeholder-like
+artifact — unrelated to jurisdiction, not fixed by this change, not
+conflated with it.
+
 ## Bottom line
 
 Checks (a) fan-out, (b) subagent schema, and (c) council schema pass on
