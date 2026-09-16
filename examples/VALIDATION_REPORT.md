@@ -1,5 +1,28 @@
 # /council validation report — real run
 
+## Final state summary (2026-09-16) — read this first
+
+Everything below this section is the full, chronological, evidence-by-evidence
+narrative — kept intact because it's the record of *how* each conclusion was
+reached, not just what the conclusion was. This section exists so a future
+reader (very possibly you, months from now) doesn't have to re-read 550+
+lines to answer "is X actually fixed, and how do I know." Each row links
+down to its own section by name.
+
+| Finding | Status | What actually verifies it |
+|---|---|---|
+| **EC-01–07** (context grounding, worked examples + harness, tool naming, Saudi-specific subagent context, model decision, README/LICENSE, prompt-injection guard, XREF-01 CLI integration) | **Closed** | Original implementation commits; not revisited in later sessions because nothing since has contradicted them. |
+| **EC-08** (hardcoded repo path removed) | **Closed** | Fixed once, not regressed since. |
+| **EC-09** (harness/command schema mismatch) | **Closed** | Fixed once, not regressed since. |
+| **EC-10** (`01-clear-approve` expectation reconciled to accept `approve_with_conditions`) | **Closed** | See "Note on 01-clear-approve" below; re-confirmed correct in every later batch. |
+| **EC-02 — jurisdiction gate** (CEO must not assume/infer Saudi jurisdiction from an unstated location) | **Closed at the code level, verified** | See "Jurisdiction gate replaced with a real code-level block, 2026-09-16" below. Five prompt-only attempts each reduced but never eliminated the failure (four escalating council.md/subagent-prompt rewordings, one exposed as ineffective by a direct live experiment). The actual fix is `--disallowedTools "Bash"` in `validate.py`'s `run_council()`, computed mechanically from decision.md's `jurisdiction:` field — code enforcement, not model cooperation. Confirmed 9/9 on check (e) in the most recent full batch, including one run where the CEO tried to circumvent it via subagent delegation and was blocked there too. |
+| **EC-02 — schema drift** (invented extra top-level fields: `human_review_required`, `conditions_for_approval`, a literal control character in `reasoning`, etc.) | **Partially closed** | The *detection* is fully closed and reliable: `validate_council_schema`/`validate_subagent_schema`'s extra-key check has caught every single instance found, with zero false negatives across every batch it's been active for (self-tests 7, 10). The *prevention* is not: council.md's "Return ONLY the fields listed above" instruction, even after being strengthened to name six specific recurring offenders, still lets a new field slip through occasionally (most recent batch: 2/9 runs). This is expected to keep recurring at a low, non-zero rate — treat the schema check as the permanent backstop, not the prompt wording. |
+| **EC-02 — cto-agent/chro-agent schema breaks under contradictory regulatory follow-up data** | **Closed, fix verified against the real captured failure** | Root-caused to a downstream cascade of the (now-fixed) jurisdiction bug: the subagent, on receiving self-contradictory data, asked a prose clarifying question instead of returning JSON. Fixed by requiring the contradiction go into `key_risks` as a sentence, never replace the JSON reply. Re-verified live: the identical contradiction now correctly produces a valid JSON reply with the concern folded into `key_risks`. |
+| **EC-02 — raw control character in council JSON `reasoning`** | **Closed, fix verified against the real captured failure** | A model formatting slip (literal newline instead of `\n` inside a JSON string), unrelated to jurisdiction. Fixed with a targeted, code-level repair (`_escape_raw_control_chars_in_json_strings`) in `extract_json()`, verified to recover the actual failing transcript. Self-test 10 covers it; 0 recurrences across the fresh batch that followed. |
+| **EC-02 — Windows `claude.cmd` shim argument truncation** | **Closed** | A self-inflicted regression from adding a multi-line `jurisdiction:`/`Proposal:` shape to decision.md — an inline `-p <prompt>` CLI arg got silently truncated at the first newline. Fixed by piping the prompt via stdin instead (same fix pattern as saudi-law-tracker's `run_evals.py`). |
+| **EC-02 — placeholder/phantom subagent launch artifact** | **Closed, filtered** | A harmless Claude Code CLI transcript quirk (a `general-purpose`/`"placeholder"` launch with no result, alongside real async launches). `_is_placeholder_launch_artifact` filters it; self-test 6 covers it. |
+| **Known, currently non-triggered gap**: `regulatory_bash_query_invoked()` only scans the top-level session's own `Bash` tool_use, not a subagent-delegated attempt to run the same command | **Open, watch-item, not urgent** | Observed live: the CEO tried exactly this circumvention once, and it failed only because the delegated subagent also lacked Bash (confirmed `--disallowedTools` propagates to subagents). If a future subagent type or session config ever does grant Bash, this detector would miss a successful delegated call. Worth closing if that ever becomes plausible; not fixed as of 2026-09-16. |
+
 This is the actual, unedited output of a real `/council` validation run —
 not `--self-test`. `examples/.results/<timestamp>/` (the raw per-run
 `.stdout.jsonl` transcripts and `summary.json` this generates) is gitignored
