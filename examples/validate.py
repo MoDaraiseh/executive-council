@@ -39,7 +39,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -319,7 +318,7 @@ def parse_transcript(raw_stdout: str):
     final_text = None
     fallback_result_text = None
 
-    for lineno, line in enumerate(raw_stdout.splitlines(), start=1):
+    for line in raw_stdout.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -1275,7 +1274,7 @@ def build_broken_transcript():
         tool_ids[agent] = tid
         assistant_content.append(_make_task_use_block(tid, agent))
     lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content}}))
-    for i, (agent, tid) in enumerate(tool_ids.items()):
+    for i, tid in enumerate(tool_ids.values()):
         reply = bad_subagent_reply if i == 0 else ok_subagent_reply
         lines.append(_fixture_line(_make_tool_result(tid, reply)))
     lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": council_reply}]}}))
@@ -1720,7 +1719,7 @@ def main(argv=None):
     log_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Staging context/ from: {CONTEXT_ROOT}")
-    print(f"Backing up current context/ before making any changes...")
+    print("Backing up current context/ before making any changes...")
     backup_dir = backup_context()
 
     all_results = []

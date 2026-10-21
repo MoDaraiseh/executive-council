@@ -48,6 +48,16 @@ That single command is defined in [.claude/commands/council.md](.claude/commands
    ```
 3. The CEO step collects all five, applies the decision logic below, and returns one final JSON verdict (same shape, plus a `council_summary` of all five replies and a `key_disagreements` list) — see [.claude/commands/council.md](.claude/commands/council.md) for the exact schema.
 
+### Regulatory lookup dependency (KSA decisions only)
+
+For a decision whose `jurisdiction:` is `KSA`/`Saudi Arabia` and that touches Saudi regulation, the CEO step runs the separate [saudi-law-tracker](https://github.com/MoDaraiseh/saudi-law-tracker) project's `query --json` command. [council.md](.claude/commands/council.md) step 5 calls it at a fixed path:
+
+```
+C:\Users\darai_qtguapt\saudi-law-tracker\.venv\Scripts\saudi-law-tracker.exe
+```
+
+On another machine or install location, edit that path in `council.md`. If the command is missing or fails, the council is instructed to carry on, say plainly in its `reasoning` that no regulatory context was available, and never fabricate a citation to fill the gap. For any other jurisdiction it is told not to run the command at all, and `examples/validate.py` enforces that in code (`--disallowedTools "Bash"`).
+
 ## Decision logic
 
 The CEO synthesis step doesn't just average the five recommendations. Two rules take priority over majority vote:

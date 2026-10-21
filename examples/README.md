@@ -73,12 +73,13 @@ Raw transcripts and a machine-readable `summary.json` are written to
 `examples/.results/<timestamp>/` for debugging; that folder is generated
 output, not source, and can be deleted freely.
 
-**Note:** this sandbox does not have the `claude` CLI on `PATH`, so the script
-was validated here only via `--self-test` (canned transcripts covering a
-well-formed run, a run missing an invocation with a malformed subagent reply,
-and a run with an unexpected `final_decision`) plus a manual check of the
-context staging/restore logic — both pass. Run the script for real wherever
-`claude` is installed to get an actual live report against the CLI.
+**Live vs. offline:** a real run needs the `claude` CLI and makes live model
+calls (each council run invokes the CEO step plus five subagents), so it costs
+real usage. `--self-test` needs neither: its 12 canned transcripts exercise
+the harness's own parsing and checks (a)–(e), including several failure modes
+first seen in live runs. The live results and how each finding was verified are
+recorded in [VALIDATION_REPORT.md](VALIDATION_REPORT.md) (latest full live
+batch: 2026-09-16).
 
 ## Subagent model comparison (haiku vs sonnet)
 
