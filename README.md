@@ -50,13 +50,19 @@ That single command is defined in [.claude/commands/council.md](.claude/commands
 
 ### Regulatory lookup dependency (KSA decisions only)
 
-For a decision whose `jurisdiction:` is `KSA`/`Saudi Arabia` and that touches Saudi regulation, the CEO step runs the separate [saudi-law-tracker](https://github.com/MoDaraiseh/saudi-law-tracker) project's `query --json` command. [council.md](.claude/commands/council.md) step 5 calls it at a fixed path:
+For a decision whose `jurisdiction:` is `KSA`/`Saudi Arabia` and that touches Saudi regulation, the CEO step runs the separate [saudi-law-tracker](https://github.com/MoDaraiseh/saudi-law-tracker) project's `query --json` command. [council.md](.claude/commands/council.md) step 5 runs:
 
 ```
-C:\Users\darai_qtguapt\saudi-law-tracker\.venv\Scripts\saudi-law-tracker.exe
+"${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector <sector> --json
 ```
 
-On another machine or install location, edit that path in `council.md`. If the command is missing or fails, the council is instructed to carry on, say plainly in its `reasoning` that no regulatory context was available, and never fabricate a citation to fill the gap. For any other jurisdiction it is told not to run the command at all, and `examples/validate.py` enforces that in code (`--disallowedTools "Bash"`).
+Install saudi-law-tracker so `saudi-law-tracker` is on your `PATH`, or set the `SAUDI_LAW_TRACKER` environment variable to the full path of its executable, for example on Windows:
+
+```powershell
+setx SAUDI_LAW_TRACKER "C:\path\to\saudi-law-tracker\.venv\Scripts\saudi-law-tracker.exe"
+```
+
+Restart Claude Code after setting it. If the command is missing or fails, the council is instructed to carry on, say plainly in its `reasoning` that no regulatory context was available, and never fabricate a citation to fill the gap. For any other jurisdiction it is told not to run the command at all, and `examples/validate.py` enforces that in code (`--disallowedTools "Bash"`).
 
 ## Decision logic
 

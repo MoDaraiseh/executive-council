@@ -1008,7 +1008,7 @@ def _make_tool_result(tool_id, text):
     return {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
 
 
-def _make_bash_tool_use_block(tool_id, command='"C:\\Users\\darai_qtguapt\\saudi-law-tracker\\.venv\\Scripts\\saudi-law-tracker.exe" query --sector labor --json'):
+def _make_bash_tool_use_block(tool_id, command='"${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector labor --json'):
     """Council.md step 5's regulatory query, as it actually appears in a raw
     transcript -- used to give regulatory_bash_query_invoked something real
     to detect in self-test fixtures, rather than only ever testing against

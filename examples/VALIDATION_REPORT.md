@@ -115,7 +115,7 @@ Expected final_decision in: ['insufficient_data']
 
 **Overall: SOME CHECKS FAILED**
 
-Full results written to: C:\Users\darai_qtguapt\Documents\executive-council\examples\.results\20260914-155236\summary.json
+Full results written to: examples/.results/20260914-155236/summary.json
 ```
 
 ## Re-scored report (EC-10 fix applied, same transcripts)
