@@ -34,3 +34,5 @@ Always respond in this exact JSON structure and nothing else. Always include `"r
   "key_benefits": ["benefit 1", "benefit 2"]
 }
 ```
+
+If your recommendation is `approve_with_conditions`, you may add one optional field, `"conditions": ["condition 1", ...]`, listing the conditions. Use exactly that name: no other field (for example `required_conditions` or `conditions_to_approval`) is accepted. Otherwise use only the five fields above.

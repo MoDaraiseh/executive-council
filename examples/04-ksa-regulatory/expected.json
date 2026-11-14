@@ -1,0 +1,9 @@
+{
+  "example": "04-ksa-regulatory",
+  "description": "A jurisdiction: KSA hiring plan that plainly touches Saudi labour regulation (Saudization/Nitaqat). It is the suite's only positive-path case: the council should run the saudi-law-tracker query, forward the rows to cto-agent and chro-agent, and still produce valid output. The people context seeds a real Saudization problem: the proposed mix takes the company below its own internal Nitaqat line, and a compliant alternative mix exists.",
+  "acceptable_final_decisions": ["approve_with_conditions", "reject"],
+  "unacceptable_final_decisions": ["approve"],
+  "expected_regulatory_context_consulted": true,
+  "requires_regulatory_tool": true,
+  "notes": "A bare 'approve' would mean the seeded Saudization risk was ignored. 'approve_with_conditions' (e.g. switch to the 8/4 mix, get legal sign-off) and 'reject' are both defensible. Check (e) needs the saudi-law-tracker CLI to be reachable (SAUDI_LAW_TRACKER or saudi-law-tracker on PATH). If it isn't, validate.py reports check (e) as n/a for this example instead of failing it. The Nitaqat figures in context/people/ are illustrative internal estimates for this fixture, not real MHRSD thresholds."
+}

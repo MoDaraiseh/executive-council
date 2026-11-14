@@ -1,0 +1,9 @@
+# Lint settings for examples/validate.py and .claude/hooks/jurisdiction_gate.py.
+target-version = "py310"
+line-length = 120
+
+[lint]
+# Ruff's defaults, plus the rules behind earlier review findings:
+# non-executable shebang (EXE), naive datetime.now() (DTZ),
+# subprocess.run without check= (PLW1510) and unused unpacked variables (RUF059).
+extend-select = ["EXE", "DTZ", "PLW1510", "RUF059"]

@@ -1,13 +1,141 @@
-# /council validation report — real run
+# /council validation report
 
-## Final state summary (2026-09-16) — read this first
+## Current state (2026-11-14) — read this first
 
-Everything below this section is the full, chronological, evidence-by-evidence
-narrative — kept intact because it's the record of *how* each conclusion was
-reached, not just what the conclusion was. This section exists so a future
-reader (very possibly you, months from now) doesn't have to re-read 550+
-lines to answer "is X actually fixed, and how do I know." Each row links
-down to its own section by name.
+This section is the current record. Everything after it is the
+chronological record from 2026-09-14 to 2026-09-16, kept for how each
+conclusion was reached; its statuses are superseded where this section
+says so.
+
+### Correction to the September record: those runs likely tested a stale command
+
+Claude Code gives a user-level `~/.claude/commands/council.md` precedence
+over the project's `.claude/commands/council.md` (confirmed 2026-11-14 with
+marker files, Claude Code 2.1.270; project *agents* do win over user-level
+agents of the same name). The machine these runs were made on had a
+personal `council.md` last written 2026-09-14 12:00 +03, before every live
+batch below. It matches no committed version of the repo's file: it has no
+`jurisdiction:` field read, no `model: opus`, and none of the later
+output-format rules. The September runs used the same CLI version.
+
+So the September live batches most likely ran that stale command, not the
+repo's `council.md`. That would explain why each council.md prompt fix
+appeared to change nothing (they were never loaded), and why the
+`--disallowedTools` CLI flag was the only fix that took effect. It also
+means the CEO step in those runs probably didn't run on Opus. Read the
+September conclusions about council.md wording in that light. The
+subagent-level fixes (agent files) were loaded as written.
+
+`validate.py` now runs a copy of the command under its own name
+(`/council-under-test`) in a throwaway workspace, so this can't recur in
+harness runs. Interactive users with a personal copy are still affected;
+see the README.
+
+### What changed on 2026-11-14
+
+| Finding | Status | Evidence |
+|---|---|---|
+| Jurisdiction gate existed only in `validate.py`; a normal `/council` run had none | **Closed, verified live** | A project hook (`.claude/settings.json` → `.claude/hooks/jurisdiction_gate.py`) reads the field in code on every `/council` prompt and denies every Bash/PowerShell call for a non-Saudi run, including calls from subagents (hooks see subagent calls under the parent session). With the CLI-level gate turned off (`--no-cli-gate`), the hook alone held on all 4 non-Saudi runs. In one of them the CEO tried a shell command (`echo done`) and the hook denied it. Self-test 13 covers 12 hook decisions as a real subprocess. |
+| `--disallowedTools "Bash"` left PowerShell available | **Closed** | Found during this pass: headless sessions expose a PowerShell tool too. The harness now passes `--tools Agent,Task,Read,Grep,Glob` (an exclusive list; `Bash` is added only for Saudi runs) plus `--disallowedTools Bash,PowerShell`. The hook matches both tools. |
+| Gate inside `if skip_permissions:`; `--no-skip-permissions` dropped it, and its help text claimed it controlled `--dangerously-skip-permissions` | **Closed** | `build_command()` applies the gate and permission pre-approval independently. The flag is now `--no-preapprove`, with honest help text; the old name is kept as a hidden alias. Self-test 15. |
+| No positive-path scenario | **Closed, verified live** | New `04-ksa-regulatory` (`jurisdiction: KSA` hiring plan with a seeded Saudization problem). In all 3 completed default-config runs and both hook-only runs, the query ran, returned rows, and cto/chro were re-consulted. |
+| Jurisdiction match was exact (`Kingdom of Saudi Arabia`, `KSA (Riyadh)` counted as non-Saudi) | **Closed** | One shared normalizer (aliases, parentheticals, dots, lists; negations like `non-Saudi` still don't count). The same code runs in the hook and the harness, and council.md and the three agents state the same rule. Self-test 11 (16 cases). Also fixed: a blank `jurisdiction:` value used to swallow the next line as its value. |
+| `regulatory_bash_query_invoked()` scanned only top-level Bash | **Closed** | It now matches Bash and PowerShell at any depth: subagent tool calls are streamed with `parent_tool_use_id` (confirmed live). The hook's PostToolUse audit log is a second, transcript-independent signal. Self-test 14 covers a delegated PowerShell call. A CEO self-report that disagrees with what actually ran now fails check (e) instead of only adding a note. |
+| Harness staged fixtures into the real `context/` folders | **Closed** | Each run gets its own temp workspace; the repo's `context/` is never written to. This also makes `--jobs` parallelism safe. Self-test 16. |
+| Model versions not recorded; raw transcripts not committed | **Closed / mitigated** | Each run records the Claude Code version and the exact model IDs per CEO turn and per subagent, plus a SHA-256 of the raw transcript (listed below). Transcripts stay git-ignored: they're large and contain local paths. |
+| `final_decision` could come from a subagent's streamed text | **Closed** | Only a top-level (CEO) message counts as the final answer. |
+| CEO turns after async results ran on the session default model | **Closed in the harness; open interactively** | Found during this pass: in 1 of 31 runs, the CEO's later turns (final synthesis included) ran on `claude-sonnet-5`. The command's `model: opus` covered only its first turn. The harness now passes `--model` from council.md's frontmatter, verified live (all turns `claude-opus-5`). For interactive use, select Opus for the session. |
+| Agents invented their own conditions field (`conditions_to_approval`, `required_conditions`, `mandatory_conditions`) | **Closed, verified live** | Every 04 run in the first batch failed check (b) this way. The harness accepted an optional `conditions` field, but no agent prompt mentioned it. All five agents now document that one field, and the next 3 default-config 04 runs had 0 such failures. |
+| Errors from a repeated agent (cto/chro follow-up) overwrote the first reply's | **Closed** | Found during this pass: a run showed check (b) FAIL with no error listed. Errors are now keyed `cto-agent#2` etc. |
+| Usage-limit failures scored as council failures | **Closed** | When the CLI ends a run with an error result (e.g. "You've hit your session limit"), the run is reported as an infrastructure error and left out of all pass rates. 9 runs in this pass hit the limit; they are listed below but not scored. Self-test 19. |
+| README: subagent schema "4 fields" | **Closed** | README now documents the 5-field reply (with `role`) and the optional `conditions`. |
+| Ruff: non-executable shebang, `subprocess.run` without `check`, unused `most_common_decision`, naive `datetime.now()` | **Closed** | `validate.py` is mode 100755 in git; `check=False` is explicit; the most common decision is reported; log directories use UTC. `ruff.toml` pins these rules (EXE, PLW1510, RUF059, DTZ) on top of the defaults, and CI runs ruff plus the 19 self-tests. |
+| Hardcoded personal install path in council.md/README | **Closed (2026-11-13)** | The command runs `"${SAUDI_LAW_TRACKER:-saudi-law-tracker}"` (commit `9398506`). The harness uses the same variable to decide whether 04's check (e) can run. |
+| Every MCP connector (mail, drive, …) was exposed to council runs | **Closed in the harness** | `--strict-mcp-config` on every run. Interactive runs still see whatever connectors the user has. |
+| Haiku-vs-Sonnet comparison | **Open, documented** | Still the 2026-09-14 data (Agent-tool calls, outside the harness, before the jurisdiction fix and the `role` field, n=2 per cell). The README now says so and treats it as preliminary. `--subagent-model sonnet` reruns it through the harness; that rerun has not been done. |
+| Subagent prose instead of JSON | **Open, low rate** | 1 of 19 scored runs on the final prompts (a cfo-agent reply in 04, hook-only batch) was prose with no JSON block. Check (b) catches it; prompt wording doesn't fully prevent it. |
+
+### Live results on the final prompts
+
+All runs: Claude Code 2.1.270; CEO `claude-opus-5` (one run also had
+`claude-sonnet-5` turns, see above); subagents `claude-haiku-4-5-20251001`.
+Hashes are the first 12 hex digits of the SHA-256 of each run's
+`.stdout.jsonl`.
+
+**Default configuration** (CLI gate + hook). Results dirs `20261114-175858Z`
+(01–03), `20261114-214333Z` (04) and `20261114-220202Z` (01, `--model`
+check):
+
+| Example | Run | Result | final_decision | Query ran | Transcript |
+|---|---|---|---|---|---|
+| 01-clear-approve | 1 | PASS | approve_with_conditions | no | `be9696704cc5` |
+| 01-clear-approve | 2 | PASS | approve_with_conditions | no | `68531736ca63` |
+| 01-clear-approve | 3 | PASS | approve_with_conditions | no | `c6447bd6387d` |
+| 01-clear-approve | 4 (`--model`) | PASS | approve_with_conditions | no | `ac629bf14fa6` |
+| 02-compliance-red-flag | 1 | PASS | reject | no | `4e40ccc193e4` |
+| 02-compliance-red-flag | 2 | PASS | reject | no | `05e27759cbb6` |
+| 02-compliance-red-flag | 3 | PASS | reject | no | `f1ce350fc899` |
+| 03-no-context | 1 | PASS | insufficient_data | no | `8b5a8fc38497` |
+| 03-no-context | 2 | PASS | insufficient_data | no | `22da2288d63e` |
+| 03-no-context | 3 | PASS | insufficient_data | no | `8348bd046555` |
+| 04-ksa-regulatory | 1 | PASS | reject | yes | `ea9b1f447e9f` |
+| 04-ksa-regulatory | 2 | PASS | reject | yes | `ac9c0e6f1a7f` |
+| 04-ksa-regulatory | 3 | PASS | approve_with_conditions | yes | `3be5c83842d2` |
+
+In every 04 run the hook also denied one extra shell command: the CEO tried
+to post-process the query output with an inline script. The rule allows
+only the query itself during `/council`, and every run still completed.
+
+**Hook only** (`--no-cli-gate`, the enforcement an interactive run gets).
+Results dir `20261114-215331Z`:
+
+| Example | Run | Result | final_decision | Query ran | Hook denials | Transcript |
+|---|---|---|---|---|---|---|
+| 01-clear-approve | 1 | PASS | approve_with_conditions | no | 0 | `5aad3cfda514` |
+| 01-clear-approve | 2 | PASS | approve_with_conditions | no | 1 (`echo done`) | `8e58d56e7a88` |
+| 03-no-context | 1 | PASS | insufficient_data | no | 0 | `a49834ea0b7e` |
+| 03-no-context | 2 | PASS | insufficient_data | no | 0 | `569ac5a9f886` |
+| 04-ksa-regulatory | 1 | PASS | reject | yes | 1 | `d8aa88e014ba` |
+| 04-ksa-regulatory | 2 | FAIL (b): cfo-agent replied in prose | approve_with_conditions | yes | 1 | `9d14461da74d` |
+
+**Totals on the final prompts:** 18/19 runs passed every check (95%
+Wilson interval 75–99%). Check (e), "the regulatory step ran if and only if
+it should", passed 19/19 (83–100%): 14/14 non-Saudi runs never ran the
+query, and 5/5 KSA runs did. Two ways the gate could fail were also
+probed directly, both outside these 19 runs: the CEO delegating the query
+to a subagent (self-test 14, plus a live September observation), and a
+shell call with no CLI gate behind it (the `echo done` denial above).
+
+**Not scored:** 9 runs hit the account's session usage limit and returned
+no council output (`20261114-175858Z` 04 runs 1–3; `20261114-180459Z`, all
+6). Batch `20261114-175014Z` (12 runs, 9 PASS) predates the
+`conditions`-field fix; its three 04 failures are the finding above, and its
+01–03 runs passed 9/9.
+
+### What these numbers do and don't show
+
+- **Small samples.** 3 runs per example per configuration. 3/3 has a 95%
+  lower bound of about 44%, 14/14 about 78%. These runs show the gate and
+  schemas working on these four scenarios; they don't establish a failure
+  rate. The harness now prints the interval next to every rate.
+- **Not adversarial.** All four examples are ordinary decisions. None
+  tries prompt injection, conflicting jurisdiction fields, or deliberate
+  attempts to make the CEO evade the gate. The September "9/9" figure was
+  check (e) over 9 ordinary validation runs; 7 of those 9 passed every
+  check, and 2 failed check (c) on an invented extra council field.
+  Describe it that way, not as "9/9 adversarial tests passed".
+- **One positive-path scenario.** 04 covers Saudi labour regulation only;
+  tax, data-protection and licensing sectors aren't exercised.
+- **The 04 fixture's Nitaqat figures are invented** for the test. They
+  show the council reacts to a seeded Saudization gap, not that its
+  regulatory reading is correct.
+
+## Status as recorded on 2026-09-16 (historical)
+
+Superseded by the section above wherever they differ. In particular, the
+jurisdiction gate is now also a project hook; the delegated-call detection
+gap in the last row is closed; and "council.md prompt fixes didn't work"
+should be read with the stale-command correction in mind.
 
 | Finding | Status | What actually verifies it |
 |---|---|---|
@@ -22,6 +150,8 @@ down to its own section by name.
 | **EC-02 — Windows `claude.cmd` shim argument truncation** | **Closed** | A self-inflicted regression from adding a multi-line `jurisdiction:`/`Proposal:` shape to decision.md — an inline `-p <prompt>` CLI arg got silently truncated at the first newline. Fixed by piping the prompt via stdin instead (same fix pattern as saudi-law-tracker's `run_evals.py`). |
 | **EC-02 — placeholder/phantom subagent launch artifact** | **Closed, filtered** | A harmless Claude Code CLI transcript quirk (a `general-purpose`/`"placeholder"` launch with no result, alongside real async launches). `_is_placeholder_launch_artifact` filters it; self-test 6 covers it. |
 | **Known, currently non-triggered gap**: `regulatory_bash_query_invoked()` only scans the top-level session's own `Bash` tool_use, not a subagent-delegated attempt to run the same command | **Open, watch-item, not urgent** | Observed live: the CEO tried exactly this circumvention once, and it failed only because the delegated subagent also lacked Bash (confirmed `--disallowedTools` propagates to subagents). If a future subagent type or session config ever does grant Bash, this detector would miss a successful delegated call. Worth closing if that ever becomes plausible; not fixed as of 2026-09-16. |
+
+## 2026-09-14 run (historical)
 
 This is the actual, unedited output of a real `/council` validation run —
 not `--self-test`. `examples/.results/<timestamp>/` (the raw per-run
@@ -353,7 +483,11 @@ the earlier usage-limit block cleared:
   bug correctly in every batch tried (4/4) regardless of which exact
   phrasing triggered it that time.
 
-## Known open items (not closed)
+## Known open items as of 2026-09-15 (historical, superseded)
+
+> Superseded by the code-level gate (2026-09-16) and by the current-state
+> summary at the top of this file. Kept as the record of what was open at
+> the time.
 
 - **Issue 1 is resolved and confirmed** (see the 16:56 re-run above):
   6/6 runs on the other two examples, zero extra fields.
@@ -647,7 +781,11 @@ pre-existing, already-tracked extra-field issue and a new placeholder-like
 artifact — unrelated to jurisdiction, not fixed by this change, not
 conflated with it.
 
-## Bottom line
+## Bottom line as of 2026-09-14 (historical, superseded)
+
+> Superseded twice: by the fresh live re-run of 2026-09-15 (5/9), and by
+> the current-state summary at the top of this file. Kept only as the
+> record of that re-score.
 
 Checks (a) fan-out, (b) subagent schema, and (c) council schema pass on
 **all 9 of 9** real runs — the async role-attribution fix and the

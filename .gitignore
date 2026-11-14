@@ -8,7 +8,11 @@ context/*/*
 # summaries) — not source, safe to delete.
 examples/.results/
 
-# Byte-compiled Python (examples/validate.py is the one script in this repo)
+# Per-user Claude Code settings
+.claude/settings.local.json
+*.lock
+
+# Byte-compiled Python
 __pycache__/
 *.pyc
 

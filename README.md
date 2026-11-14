@@ -26,31 +26,27 @@ Should we launch this hiring plan in Riyadh?
 Should we acquire this competitor's retail chain?
 ```
 
-This isn't optional decoration — it's how the council decides whether to run its one regulatory tool (a Saudi-law lookup, see step 4 below), and it's read mechanically, not inferred. `unspecified` is a fully valid, expected value: it guarantees the regulatory step is skipped rather than guessed at. Only `KSA` and `Saudi Arabia` (case-insensitive) are recognized as Saudi jurisdiction; anything else — a different country/region name, `unspecified`, `unknown`, or the field being left off entirely — skips the regulatory step and is noted plainly in the final `reasoning`. If you omit the field, the council still runs, but treats it as `unspecified` rather than guessing your company's jurisdiction from the rest of the decision text — do not rely on that fallback for a decision that actually needs the regulatory check; state the jurisdiction explicitly instead. (This replaced free-text jurisdiction inference by the CEO step, which repeatedly assumed Saudi Arabia by default even when nothing in the decision said so — see [examples/VALIDATION_REPORT.md](examples/VALIDATION_REPORT.md).)
+This field decides whether the council runs its one regulatory tool (a Saudi-law lookup, see step 4 below). It is read in code, not inferred by the model. `unspecified` is a valid, expected value: it guarantees the regulatory step is skipped rather than guessed at.
 
-For example:
-
-```
-/council jurisdiction: unspecified
-
-Should we extend customer support to Saturdays using existing opt-in part-time staff?
-```
+The value counts as Saudi if it names Saudi Arabia: `KSA`, `Saudi Arabia`, `Kingdom of Saudi Arabia` or `Saudi`, case-insensitive. Dots and a parenthetical are ignored (`K.S.A.`, `KSA (Riyadh)`), and in a list such as `KSA, UAE` or `Riyadh, KSA` any matching entry counts. Anything else (another country or region, `unspecified`, `unknown`, `non-Saudi`, a blank value, or no field at all) skips the regulatory step, and the final `reasoning` says so. A missing field is treated as `unspecified`; don't rely on that for a decision that actually needs the regulatory check, state the jurisdiction instead. (This replaced free-text jurisdiction inference by the CEO step, which repeatedly assumed Saudi Arabia when nothing in the decision said so; see [examples/VALIDATION_REPORT.md](examples/VALIDATION_REPORT.md).)
 
 That single command is defined in [.claude/commands/council.md](.claude/commands/council.md). Behind it:
 
-1. The CEO (this command, running on `model: opus` — the highest-judgment step in the flow) reads the `jurisdiction:` field mechanically, then sends your exact question, unmodified, to all five subagents in [.claude/agents/](.claude/agents/): `cfo-agent`, `coo-agent`, `cmo-agent`, `cto-agent`, `chro-agent`.
-2. Each subagent reads every file under its own `context/<role>/` folder (see [The context/ folder](#the-context-folder)) and returns a fixed JSON structure:
+1. The CEO (this command, running on `model: opus`, the highest-judgment step in the flow) reads the `jurisdiction:` field, then sends your exact question, unmodified, to all five subagents in [.claude/agents/](.claude/agents/): `cfo-agent`, `coo-agent`, `cmo-agent`, `cto-agent`, `chro-agent`.
+2. Each subagent reads every file under its own `context/<role>/` folder (see [The context/ folder](#the-context-folder)) and returns a fixed 5-field JSON structure:
    ```json
-   { "recommendation": "approve | approve_with_conditions | reject | insufficient_data",
+   { "role": "cfo | coo | cmo | cto | chro",
+     "recommendation": "approve | approve_with_conditions | reject | insufficient_data",
      "confidence": "low | medium | high",
      "key_risks": ["..."],
      "key_benefits": ["..."] }
    ```
-3. The CEO step collects all five, applies the decision logic below, and returns one final JSON verdict (same shape, plus a `council_summary` of all five replies and a `key_disagreements` list) — see [.claude/commands/council.md](.claude/commands/council.md) for the exact schema.
+   `role` lets the CEO step and the validation harness attribute a reply that arrives asynchronously. A cto/chro reply to the regulatory follow-up may add a sixth field, `conditions`.
+3. The CEO step collects all five, applies the decision logic below, and returns one final JSON verdict (`final_decision`, `confidence`, `regulatory_context_consulted`, a `council_summary` of all five replies, `key_disagreements` and `reasoning`); see [.claude/commands/council.md](.claude/commands/council.md) for the exact schema.
 
 ### Regulatory lookup dependency (KSA decisions only)
 
-For a decision whose `jurisdiction:` is `KSA`/`Saudi Arabia` and that touches Saudi regulation, the CEO step runs the separate [saudi-law-tracker](https://github.com/MoDaraiseh/saudi-law-tracker) project's `query --json` command. [council.md](.claude/commands/council.md) step 5 runs:
+For a decision whose jurisdiction is Saudi and that touches Saudi regulation, the CEO step runs the separate [saudi-law-tracker](https://github.com/MoDaraiseh/saudi-law-tracker) project's `query --json` command, then forwards the rows to `cto-agent` and `chro-agent` for a revised view. [council.md](.claude/commands/council.md) step 5 runs:
 
 ```
 "${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector <sector> --json
@@ -62,7 +58,27 @@ Install saudi-law-tracker so `saudi-law-tracker` is on your `PATH`, or set the `
 setx SAUDI_LAW_TRACKER "C:\path\to\saudi-law-tracker\.venv\Scripts\saudi-law-tracker.exe"
 ```
 
-Restart Claude Code after setting it. If the command is missing or fails, the council is instructed to carry on, say plainly in its `reasoning` that no regulatory context was available, and never fabricate a citation to fill the gap. For any other jurisdiction it is told not to run the command at all, and `examples/validate.py` enforces that in code (`--disallowedTools "Bash"`).
+Restart Claude Code after setting it. (It can also go in the `env` block of a git-ignored `.claude/settings.local.json`.)
+
+If the command is missing or fails, the council is instructed to carry on, say plainly in its `reasoning` that no regulatory context was available, and never fabricate a citation to fill the gap.
+
+### Jurisdiction gate (enforced in code)
+
+The rule "never run the regulatory query for a non-Saudi decision" is not left to the model. [.claude/settings.json](.claude/settings.json) registers [.claude/hooks/jurisdiction_gate.py](.claude/hooks/jurisdiction_gate.py) as a Claude Code hook, so it applies to every `/council` run in this project, interactive or headless:
+
+- When a prompt starts with `/council`, the hook reads the `jurisdiction:` field itself, using the rule above.
+- For the rest of that `/council` run, every Bash and PowerShell call is denied unless the jurisdiction is Saudi **and** the command is the saudi-law-tracker query. Hooks also see tool calls made inside subagents, so handing the command to a subagent doesn't get around it.
+- Outside a `/council` run, a saudi-law-tracker command is denied too; other shell commands are unaffected.
+
+The hook needs `python` (3.9+) on `PATH`. If it can't start, Claude Code treats that as a non-blocking hook error and the tool call goes ahead, so check that `python` resolves. The validation harness doesn't depend on the hook alone: it also removes the shell tools at the CLI level (`--tools`, `--disallowedTools Bash,PowerShell`), and `--no-cli-gate` turns that off to test the hook by itself.
+
+### A user-level `council.md` overrides this one
+
+If you also have `~/.claude/commands/council.md`, Claude Code runs **that** file when you type `/council`, not this repo's copy (confirmed with Claude Code 2.1.270). Project agents do win over `~/.claude/agents/` copies of the same name, but the command doesn't. Delete or update any personal copy so `/council` runs the version in this repo. `examples/validate.py` avoids the problem by running a copy of the command under a different name.
+
+### The CEO model can fall back to your session model
+
+The command's `model: opus` applies to the turn that runs `/council`. If subagent results arrive asynchronously, the CEO's later turns, including the final synthesis, can run on your session's default model instead. This was seen in 1 of 31 harness runs on 2026-11-14. Select Opus for the session when running `/council`; the harness passes `--model opus` for the same reason.
 
 ## Decision logic
 
@@ -90,32 +106,41 @@ Each subagent's judgment is only as good as what it's given to read, so [context
 
 Each folder ships with its own `README.md` describing what belongs there. Before answering, every subagent is instructed to read every file under its own `context/<role>/` folder — and to return `insufficient_data` outright if the folder is empty, rather than guess. To run a real decision through the council, drop the relevant documents into these folders first; an empty (or README-only) folder is a deliberate signal to the agent that it has nothing to go on.
 
-Because these folders are meant to hold real, often sensitive business documents (budgets, legal memos, headcount data...), everything placed under `context/<role>/` other than the folder's own `README.md` is git-ignored — see [.gitignore](.gitignore). Nothing you drop in there gets committed by default.
+Because these folders are meant to hold real, often sensitive business documents (budgets, legal memos, headcount data...), everything placed under `context/<role>/` other than the folder's own `README.md` is git-ignored — see [.gitignore](.gitignore). Nothing you drop in there gets committed by default. The validation harness never writes to these folders; it uses a temporary workspace.
 
-Each of the CFO, CTO, and CHRO agents also carries a short **Local context** section covering Saudi Arabia (KSA) regulatory norms — the CFO agent for Sharia-compliant financing, zakat, VAT, and ZATCA e-invoicing; the CTO agent for PDPL data residency and the NCA's Essential Cybersecurity Controls; the CHRO agent for Saudization/Nitaqat bands, KSA notice periods, and end-of-service benefit exposure. Each of these three only weighs its KSA-specific items when the decision's `jurisdiction:` field literally reads `KSA` or `Saudi Arabia` — this is a mechanical field read, the same one the CEO step uses, not something any agent infers from the rest of the decision text.
+Each of the CFO, CTO, and CHRO agents also carries a short **Local context** section covering Saudi Arabia (KSA) regulatory norms — the CFO agent for Sharia-compliant financing, zakat, VAT, and ZATCA e-invoicing; the CTO agent for PDPL data residency and the NCA's Essential Cybersecurity Controls; the CHRO agent for Saudization/Nitaqat bands, KSA notice periods, and end-of-service benefit exposure. Each of these three weighs its KSA-specific items only when the decision's `jurisdiction:` field names Saudi Arabia under the rule above, not from anything inferred from the rest of the decision text.
 
 ## Examples and validation
 
-[examples/](examples/) has three worked decisions (a clear approve, a compliance red-flag that must trigger the near-veto rule, and an empty-context case that must return `insufficient_data`) plus a headless validation harness (`examples/validate.py`) that runs `/council` against each one and checks the output against a fixed schema. See [examples/README.md](examples/README.md) for details.
+[examples/](examples/) has four worked decisions plus a headless validation harness (`examples/validate.py`):
+
+- a clear approve;
+- a compliance red flag that must trigger the near-veto rule;
+- an empty-context case that must return `insufficient_data`;
+- a `jurisdiction: KSA` hiring plan, the one case where the regulatory query must actually run.
+
+The harness runs each decision through the real agents, command and hook in a throwaway workspace and checks the output against fixed schemas. `python examples/validate.py --self-test` checks the harness itself offline, and CI runs it on every push. See [examples/README.md](examples/README.md) for details, and [examples/VALIDATION_REPORT.md](examples/VALIDATION_REPORT.md) for live results, sample sizes and known limits.
 
 ## Subagent model: haiku
 
-The five C-suite subagents (`cfo-agent`, `coo-agent`, `cmo-agent`, `cto-agent`, `chro-agent`) run on **`model: haiku`**, not `sonnet`.
+The five C-suite subagents (`cfo-agent`, `coo-agent`, `cmo-agent`, `cto-agent`, `chro-agent`) run on **`model: haiku`**, not `sonnet`. In live runs on 2026-11-14 that resolved to `claude-haiku-4-5-20251001`, and the CEO step's `model: opus` to `claude-opus-5`. The harness records the exact IDs for every run.
 
-**Why:** haiku matched sonnet closely enough on the metrics that matter here — schema validity and decision consistency — that the cost step-up to sonnet (several times the price per token) wasn't justified for what is a bounded, structured evaluation task over a small set of already-curated context documents, not open-ended reasoning.
+**Why:** in a small comparison, haiku matched sonnet closely enough on schema validity and decision consistency that sonnet's higher price wasn't justified for a bounded, structured evaluation over a few curated documents.
 
-**What was measured:** both settings were run live against all three [examples/](examples/) (a clear approve, a compliance red-flag that must trigger the near-veto rule, and an empty-context case that must return `insufficient_data`), 2 runs each, 5 subagent calls per run — 60 live subagent invocations total, using the actual `.claude/agents/*.md` definitions with `model:` temporarily set to each value. (The `claude` CLI wasn't available in the sandbox this was run in, so `examples/validate.py` itself couldn't be shelled out to; the same decisions, context-staging, and schema-validation logic from that script were run directly instead, via live Agent-tool calls. Raw results: [examples/model-comparison-results.json](examples/model-comparison-results.json).)
+**How much weight that comparison can carry:** not much. Read it as a preliminary signal, not a benchmark:
 
-| Metric | haiku | sonnet |
+- It ran on 2026-09-14, before the `role` field, the `jurisdiction:` field and the jurisdiction gate existed, so it tested earlier agent prompts against the 4-field reply schema of the time.
+- It did not go through `examples/validate.py`. The `claude` CLI wasn't available in that environment, so the same decisions and schema checks were run via direct Agent-tool calls instead.
+- It used the first three examples only, 2 runs each: n=2 per model per example, 60 subagent replies in total.
+
+| Metric (2026-09-14, n=2 per cell) | haiku | sonnet |
 |---|---|---|
-| Subagent replies matching the 4-field JSON schema | 30/30 (100%) | 30/30 (100%) |
-| Per-role recommendation agreement, run 1 vs run 2 | 12/15 (80%) | 13/15 (87%) |
-| Compliance red-flag example: reject held across both runs, all 5 roles | 10/10 (100%) | 9/10 (one run had COO soften to `approve_with_conditions`, though still on the same cited compliance risk) |
-| Council-level final_decision matched the strict expected outcome | 4/6 (67%) | 5/6 (83%) |
+| Subagent replies matching the then-current 4-field schema | 30/30 | 30/30 |
+| Per-role recommendation agreement, run 1 vs run 2 | 12/15 | 13/15 |
+| Compliance red-flag example: reject held across both runs, all 5 roles | 10/10 | 9/10 (one COO reply softened to `approve_with_conditions`, citing the same compliance risk) |
+| Council-level `final_decision` matched the strict expected outcome | 4/6 | 5/6 |
 
-The gap that shows up (mostly on the clear-approve case, where a subagent sometimes adds conditions and sometimes doesn't) was about *how cautious the wording came out*, not about missing the substance — no run of either model missed the compliance red flag's core issue, and no run of either model approved something it shouldn't have. On the one scenario with real teeth — the compliance near-veto — haiku was actually the more consistent of the two in this sample.
-
-**If you re-run this and see a different picture** (e.g. a sharper depth gap on more ambiguous or adversarial proposals than these three examples cover), the fix is a one-line change: set `model: sonnet` in each of the five `.claude/agents/*-agent.md` files.
+Raw results: [examples/model-comparison-results.json](examples/model-comparison-results.json). The differences above are one or two replies, well inside noise at this sample size. To repeat the comparison through the harness against the current prompts, run `python examples/validate.py --subagent-model sonnet` and compare it with a default (haiku) run. That rewrites `model:` only in the throwaway workspace copy, and the report shows which model IDs actually answered. If sonnet comes out clearly better, set `model: sonnet` in each of the five `.claude/agents/*-agent.md` files.
 
 ## License
 

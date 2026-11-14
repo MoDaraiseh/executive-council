@@ -5,19 +5,31 @@ Headless validation harness for the /council skill.
 For each example under examples/<name>/ (a decision.md, an expected.json, and
 an optional context/<role>/ tree), this script:
 
-  1. Stages the example's context/<role>/ files into the real context/<role>/
-     folders that .claude/agents/*.md instruct each subagent to read.
-  2. Invokes `claude -p "/council <decision>"` headlessly, capturing the full
+  1. Builds a throwaway workspace in the system temp directory: a copy of
+     this repo's .claude/ (agents, command, hooks, settings) plus a
+     context/<role>/ tree holding only that example's fixtures. The repo's
+     own context/ folders are never touched, so a crash can't leave them
+     polluted. The command is copied under a unique name
+     (/council-under-test), because a user-level
+     ~/.claude/commands/council.md takes precedence over the project's
+     command and would otherwise be what gets tested.
+  2. Runs that command headlessly with `claude -p`, capturing the full
      tool-call transcript via --output-format stream-json.
   3. Parses that transcript and checks:
-       (a) exactly five subagent invocations occurred (one per C-suite role)
-       (b) every subagent reply is valid JSON matching the 4-field schema
+       (a) all five C-suite roles were invoked, with only the legitimate
+           cto/chro regulatory follow-up repeats
+       (b) every subagent reply is valid JSON matching the 5-field schema
        (c) the final council JSON matches its schema
-       (d) final_decision matches what's expected for that example
-  4. Restores the original context/<role>/ contents afterward.
+       (d) final_decision is in the example's acceptable set
+       (e) the saudi-law-tracker query actually ran if and only if the
+           example expects it to (read from the transcript and the
+           jurisdiction-gate hook's audit log, not the CEO's self-report)
+  4. Records the exact model IDs and Claude Code version seen in each run,
+     plus a SHA-256 of each raw transcript, then deletes the workspace.
 
-Each example is run --runs times (default 3) and the script reports
-agreement across runs in addition to per-run pass/fail.
+Each example is run --runs times (default 3). The report gives per-run
+pass/fail, agreement across runs, and a 95% Wilson interval on each pass
+rate, because at these sample sizes the interval is wide.
 
 Requires the `claude` CLI on PATH. Run `python examples/validate.py --self-test`
 to exercise the parsing/validation logic against canned transcripts without
@@ -27,25 +39,53 @@ Usage:
     python examples/validate.py                      # run all examples, 3x each
     python examples/validate.py --runs 1              # quick single pass
     python examples/validate.py --example 01-clear-approve
+    python examples/validate.py --jobs 3              # run up to 3 councils at once
+    python examples/validate.py --no-cli-gate         # rely on the hook alone, as an interactive run does
+    python examples/validate.py --subagent-model sonnet
     python examples/validate.py --self-test
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
+import math
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-CONTEXT_ROOT = REPO_ROOT / "context"
+CLAUDE_DIR = REPO_ROOT / ".claude"
+GATE_PATH = CLAUDE_DIR / "hooks" / "jurisdiction_gate.py"
+# The name the command is copied under in each throwaway workspace (see the
+# module docstring for why it isn't simply /council).
+HARNESS_COMMAND = "council-under-test"
+
+
+def _load_gate():
+    """Imports .claude/hooks/jurisdiction_gate.py, the same module the hook
+    runs, so the harness and interactive /council runs can't drift apart
+    on what counts as a Saudi jurisdiction."""
+    spec = importlib.util.spec_from_file_location("jurisdiction_gate", GATE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+gate = _load_gate()
+extract_jurisdiction_field = gate.extract_jurisdiction_field
+is_recognized_saudi_jurisdiction = gate.is_recognized_saudi_jurisdiction
+is_regulatory_command = gate.is_regulatory_command
 
 # role folder name -> subagent name, per .claude/agents/*.md
 ROLE_TO_AGENT = {
@@ -72,10 +112,10 @@ SUBAGENT_ROLE_VALUES = {"cfo", "coo", "cmo", "cto", "chro"}
 # context and asks them to revise their recommendation -- the only agents
 # a real run can legitimately call more than once, and at most twice each.
 REGULATORY_FOLLOWUP_AGENTS = {"cto-agent", "chro-agent"}
-# Recognized Saudi-jurisdiction values, matching council.md step 1's own
-# definition exactly (case-insensitive, exact match only).
-RECOGNIZED_SAUDI_JURISDICTIONS = {"ksa", "saudi arabia"}
-_JURISDICTION_FIELD_RE = re.compile(r"^\s*jurisdiction\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+# Shell tools the jurisdiction gate covers. PowerShell is listed because the
+# CLI exposes it in headless sessions too, so blocking Bash alone would leave
+# a second way to run the query.
+SHELL_TOOLS = ("Bash", "PowerShell")
 COUNCIL_SCHEMA_FIELDS = {
     "final_decision",
     "confidence",
@@ -361,7 +401,10 @@ def parse_transcript(raw_stdout: str):
                 elif block.get("type") == "text":
                     text_parts.append(block.get("text", ""))
                     all_assistant_texts.append(block.get("text", ""))
-            if text_parts:
+            # Subagents' own messages are streamed too, tagged with
+            # parent_tool_use_id. Only a top-level (CEO) message can be the
+            # council's final answer.
+            if text_parts and obj.get("parent_tool_use_id") is None:
                 final_text = "".join(text_parts)
 
         elif obj_type == "user":
@@ -466,10 +509,24 @@ def parse_transcript(raw_stdout: str):
     return task_calls, final_text
 
 
-def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
-    """Scans the raw transcript directly for a Bash tool_use that invoked
-    the saudi-law-tracker query CLI (council.md step 5's regulatory step)
-    AND actually returned real data -- an attempt that hard-errored (e.g.
+def regulatory_bash_query_invoked(raw_stdout: str, audit_entries: list[dict] | None = None) -> bool:
+    """True if the saudi-law-tracker query actually ran and returned data,
+    at any depth.
+
+    Two independent signals, either of which counts:
+
+    1. The transcript: a Bash or PowerShell tool_use whose command names
+       saudi-law-tracker and whose tool_result is not an error. This scans
+       every assistant/user event, including subagent events, which the
+       CLI streams with ``parent_tool_use_id`` set (confirmed live
+       2026-11-14). A call delegated to a general-purpose subagent is
+       therefore seen too, not only top-level calls.
+    2. ``audit_entries``: the jurisdiction-gate hook's audit log
+       (COUNCIL_GATE_AUDIT_LOG). Its PostToolUse entries record every
+       saudi-law-tracker command that executed in the session, subagents
+       included, whether or not the transcript shows that call.
+
+    History of the "returned data" rule: an attempt that hard-errored (e.g.
     --disallowedTools "Bash" makes the tool absent entirely; the CLI
     returns `is_error: true`, "No such tool available: Bash...") never
     reached the real query and returned nothing a subagent could act on, so
@@ -500,6 +557,8 @@ def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
     an unestablished jurisdiction in 4/4 live batches despite four
     escalating prompt-only fixes).
     """
+    if audit_entries and any(e.get("event") == "posttool" and e.get("regulatory") for e in audit_entries):
+        return True
     candidate_ids: set[str] = set()
     for line in raw_stdout.splitlines():
         line = line.strip()
@@ -517,10 +576,10 @@ def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
             for block in content:
                 if not isinstance(block, dict):
                     continue
-                if block.get("type") != "tool_use" or block.get("name") != "Bash":
+                if block.get("type") != "tool_use" or block.get("name") not in SHELL_TOOLS:
                     continue
                 command = (block.get("input") or {}).get("command") or ""
-                if "saudi-law-tracker" in command.lower() and block.get("id"):
+                if is_regulatory_command(command) and block.get("id"):
                     candidate_ids.add(block["id"])
 
         elif obj.get("type") == "user" and candidate_ids:
@@ -542,177 +601,296 @@ def regulatory_bash_query_invoked(raw_stdout: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Context staging / restore
+# Isolated workspace (the repo's own context/ is never touched)
 # --------------------------------------------------------------------------
 
-
-def backup_context() -> Path:
-    backup_dir = Path(tempfile.mkdtemp(prefix="council-context-backup-"))
-    for role in ROLE_TO_AGENT:
-        src = CONTEXT_ROOT / role
-        dst = backup_dir / role
-        if src.exists():
-            shutil.copytree(src, dst)
-        else:
-            dst.mkdir(parents=True, exist_ok=True)
-    return backup_dir
+_MODEL_LINE_RE = re.compile(r"^model:[ \t]*\S+[ \t]*$", re.MULTILINE)
 
 
-def restore_context(backup_dir: Path) -> None:
-    for role in ROLE_TO_AGENT:
-        target = CONTEXT_ROOT / role
-        if target.exists():
-            shutil.rmtree(target)
-        target.mkdir(parents=True, exist_ok=True)
-        src = backup_dir / role
-        if src.exists():
-            for item in src.iterdir():
-                dest_item = target / item.name
-                if item.is_dir():
-                    shutil.copytree(item, dest_item)
-                else:
-                    shutil.copy2(item, dest_item)
-    shutil.rmtree(backup_dir, ignore_errors=True)
+def build_workspace(example_dir: Path, subagent_model: str | None = None) -> Path:
+    """Creates a throwaway workspace for one run and returns its path.
+
+    It holds a copy of this repo's .claude/ directory, with the command
+    renamed to /council-under-test, and a context/<role>/ tree containing
+    only this example's fixtures. An example with no context/<role>/ folder
+    (03-no-context) gets genuinely empty folders, which exercises each
+    agent's "if the folder is empty, return insufficient_data" rule.
+
+    Earlier versions staged fixtures into the repo's real context/ folders
+    and restored them afterwards. A crash mid-run once skipped the restore
+    and left the repo polluted; a separate workspace removes that failure
+    mode, and lets runs execute in parallel (--jobs).
+
+    With ``subagent_model``, the ``model:`` line of each copied
+    *-agent.md is rewritten, so a model comparison runs through this
+    harness without editing the repo's agent files.
+    """
+    ws = Path(tempfile.mkdtemp(prefix="council-ws-"))
+    try:
+        shutil.copytree(CLAUDE_DIR, ws / ".claude", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.lock"))
+        commands = ws / ".claude" / "commands"
+        (commands / "council.md").rename(commands / f"{HARNESS_COMMAND}.md")
+        if subagent_model:
+            for agent_file in sorted((ws / ".claude" / "agents").glob("*-agent.md")):
+                text = agent_file.read_text(encoding="utf-8")
+                new_text, n = _MODEL_LINE_RE.subn(f"model: {subagent_model}", text, count=1)
+                if n != 1:
+                    msg = f"{agent_file.name}: expected exactly one 'model:' frontmatter line"
+                    raise RuntimeError(msg)
+                agent_file.write_text(new_text, encoding="utf-8")
+        example_context = example_dir / "context"
+        for role in ROLE_TO_AGENT:
+            target = ws / "context" / role
+            target.mkdir(parents=True)
+            src = example_context / role
+            if src.is_dir():
+                for item in src.iterdir():
+                    if item.is_dir():
+                        shutil.copytree(item, target / item.name)
+                    else:
+                        shutil.copy2(item, target / item.name)
+    except BaseException:
+        remove_workspace(ws)
+        raise
+    return ws
 
 
-def stage_example(example_dir: Path) -> None:
-    """Clears every real context/<role>/ folder and, if the example provides
-    one, copies its context/<role>/ files in. An example with no
-    context/<role>/ subfolder (e.g. 03-no-context) is staged as a genuinely
-    empty folder, exercising each agent's literal 'if empty, insufficient_data'
-    instruction."""
-    example_context = example_dir / "context"
-    for role in ROLE_TO_AGENT:
-        target = CONTEXT_ROOT / role
-        if target.exists():
-            shutil.rmtree(target)
-        target.mkdir(parents=True, exist_ok=True)
-        src = example_context / role
-        if src.exists() and any(src.iterdir()):
-            for item in src.iterdir():
-                dest_item = target / item.name
-                if item.is_dir():
-                    shutil.copytree(item, dest_item)
-                else:
-                    shutil.copy2(item, dest_item)
+def remove_workspace(ws: Path) -> None:
+    shutil.rmtree(ws, ignore_errors=True)
+
+
+def resolve_regulatory_tool() -> str | None:
+    """Path of the saudi-law-tracker CLI a council run would reach, or None.
+
+    Looks in the same places council.md's command does: SAUDI_LAW_TRACKER
+    from the environment or from .claude/settings(.local).json "env", then
+    ``saudi-law-tracker`` on PATH.
+    """
+    candidates = [os.environ.get("SAUDI_LAW_TRACKER")]
+    for name in ("settings.local.json", "settings.json"):
+        try:
+            env = json.loads((CLAUDE_DIR / name).read_text(encoding="utf-8")).get("env") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        candidates.append(env.get("SAUDI_LAW_TRACKER"))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return shutil.which("saudi-law-tracker")
 
 
 # --------------------------------------------------------------------------
 # Running the CLI
 # --------------------------------------------------------------------------
 
-
-def extract_jurisdiction_field(decision_text: str) -> str | None:
-    """Mechanically extracts the literal value of the first `jurisdiction:`
-    line in decision_text, via regex -- no LLM involved. Returns None if the
-    field is missing entirely (treated the same as an unrecognized value by
-    callers, per council.md step 1: "If the field is missing altogether,
-    treat it exactly as unspecified")."""
-    m = _JURISDICTION_FIELD_RE.search(decision_text)
-    return m.group(1) if m else None
+BASE_TOOLS = ("Agent", "Task", "Read", "Grep", "Glob")
 
 
-def is_recognized_saudi_jurisdiction(value: str | None) -> bool:
-    return value is not None and value.strip().lower() in RECOGNIZED_SAUDI_JURISDICTIONS
+def compute_tool_flags(decision_text: str) -> dict:
+    """Tool flags for one headless run, gated on the jurisdiction: field.
+
+    Returns {"tools", "allowed", "disallowed"} as comma-joined strings
+    ("disallowed" may be None). A pure function, so the gating decision is
+    unit-testable without running the CLI.
+
+    * "tools" goes to --tools, which is an exclusive list of built-in
+      tools: anything not named does not exist for the session or its
+      subagents. Bash is included only for a recognized Saudi jurisdiction.
+      Confirmed live 2026-11-14: with --tools "Agent,Task,Read,Grep,Glob",
+      neither the CEO nor a general-purpose subagent had any shell, and the
+      subagent could still Read its files.
+    * "disallowed" goes to --disallowedTools and names both Bash and
+      PowerShell for any non-Saudi jurisdiction, as a second layer.
+      Disallowing Bash alone was the previous gate, and it left PowerShell
+      available: the CLI exposes PowerShell in headless sessions too.
+    * "allowed" goes to --allowedTools. That flag only pre-approves tools
+      so a headless run gets no permission prompts. It does not restrict
+      anything: confirmed live 2026-09-16, a tool left out of
+      --allowedTools still ran.
+    """
+    saudi = is_recognized_saudi_jurisdiction(extract_jurisdiction_field(decision_text))
+    tools = list(BASE_TOOLS) + (["Bash"] if saudi else [])
+    return {
+        "tools": ",".join(tools),
+        "allowed": ",".join(tools),
+        "disallowed": None if saudi else ",".join(SHELL_TOOLS),
+    }
 
 
-def compute_tool_flags(decision_text: str) -> tuple[str, str | None]:
-    """Returns (allowed_tools, disallowed_tools_or_None) for a headless
-    /council run, gated on decision_text's jurisdiction: field. Bash is
-    permitted only for a recognized Saudi jurisdiction -- see
-    run_council()'s comment for why this replaced trusting the CEO's own
-    prompt-level jurisdiction gate, and for why --disallowedTools (not
-    merely omitting Bash from --allowedTools) is the part that actually
-    works. A pure function so the gating decision itself is unit-testable
-    without mocking subprocess."""
-    jurisdiction = extract_jurisdiction_field(decision_text)
-    if is_recognized_saudi_jurisdiction(jurisdiction):
-        return "Agent,Task,Bash", None
-    return "Agent,Task", "Bash"
+def command_model() -> str | None:
+    """The ``model:`` alias in council.md's frontmatter (``opus``), or None."""
+    text = (CLAUDE_DIR / "commands" / "council.md").read_text(encoding="utf-8")
+    m = re.match(r"---\s*\n(.*?)\n---", text, re.DOTALL)
+    if not m:
+        return None
+    found = re.search(r"^model:[ \t]*(\S+)", m.group(1), re.MULTILINE)
+    return found.group(1) if found else None
 
 
-def run_council(decision_text: str, claude_bin: str, skip_permissions: bool, timeout: int):
-    prompt = f"/council {decision_text}"
-    # The prompt is passed via stdin (input=prompt below), not as an inline
-    # CLI argument -- confirmed live 2026-09-15 (01-clear-approve): once
-    # decision.md gained a multi-line `jurisdiction: ...\n\nProposal: ...`
-    # shape, an inline `-p <prompt>` arg got silently truncated at the first
-    # newline by the Windows claude.cmd npm shim re-parsing the argument
-    # string through cmd.exe a second time (the CEO received only
-    # "jurisdiction: unspecified" and nothing after it, all 9/9 runs). This
-    # is the same root cause already found and fixed the same way in
-    # saudi-law-tracker's evals/agent/run_evals.py (run_judge()) -- not a
-    # length-limit issue, a multi-line-inline-argument quoting issue.
-    # Piping via stdin sidesteps the CLI re-quoting entirely.
-    cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose"]
-    if skip_permissions:
-        # Verified live (2026-09-14, claude-code 2.1.270): the subagent-spawn
-        # tool is actually named "Agent" now, not "Task" (a real transcript
-        # confirmed this: every cfo/coo/cmo/cto/chro invocation showed up as
-        # a "name":"Agent" tool_use block); "Task" is kept alongside it in
-        # case a different build still uses the legacy name. --allowedTools
-        # naming both, plus Bash for the regulatory step's saudi-law-tracker
-        # query call, is enough for a fully non-interactive run with zero
-        # permission_denials. Prefer this scoped allowlist over
-        # --dangerously-skip-permissions, which some harnesses running this
-        # script themselves (a Claude Code session) refuse outright as
-        # "create unsafe agents" when it's used to spawn a nested claude
-        # session -- --allowedTools isn't a blanket bypass, so it isn't
-        # caught by that check.
-        #
-        # Bash is permitted ONLY when decision_text's jurisdiction: field is
-        # a recognized Saudi value -- a code-level gate, not a prompt
-        # instruction the CEO can fail to follow. Five escalating prompt-only
-        # attempts at getting the CEO to self-gate the regulatory step on
-        # jurisdiction (never resolve an ambiguous phrase -> a two-part gate
-        # -> a quote-forcing checkpoint -> removing the hardcoded Saudi
-        # framing from cfo/cto/chro-agent.md -> a required jurisdiction:
-        # field read in council.md's own instructions) all failed some
-        # fraction of live runs, worsening to 0/3 in the batch that also
-        # showed it cascading into a cto-agent schema break (EC-02, see
-        # VALIDATION_REPORT.md).
-        #
-        # IMPORTANT, confirmed live 2026-09-16 by direct experiment, not
-        # assumed: simply leaving Bash out of --allowedTools does NOT deny
-        # it. A bare `claude -p` call with --allowedTools "Agent,Task" (no
-        # Bash) and a prompt explicitly instructing a Bash command still ran
-        # it successfully, with permission_denials: [] in the result -- this
-        # CLI's headless default (--permission-mode default, no
-        # --permission-prompts override) auto-approves a tool omitted from
-        # --allowedTools rather than denying it; --allowedTools is a
-        # pre-approval list, not an allowlist that excludes anything not on
-        # it. The mechanism that actually works, confirmed the same way: a
-        # second experiment adding --disallowedTools "Bash" made Bash
-        # disappear from the init event's own tool list entirely, and the
-        # model correctly reported it had no shell execution tool available
-        # rather than finding a workaround. So the gate here is
-        # --disallowedTools, not the absence of Bash from --allowedTools --
-        # this subsumes the prompt-level gate for this harness; council.md's
-        # own instructions and check (e) both stay in place as
-        # defense-in-depth (check (e) should now read as a permanent PASS
-        # for jurisdiction-unspecified examples specifically because the
-        # tool is structurally unavailable, not because the CEO chose
-        # correctly).
-        allowed_tools, disallowed_tools = compute_tool_flags(decision_text)
-        cmd += ["--allowedTools", allowed_tools]
-        if disallowed_tools:
-            cmd += ["--disallowedTools", disallowed_tools]
+def build_command(
+    decision_text: str,
+    claude_bin: str,
+    *,
+    preapprove: bool,
+    cli_gate: bool,
+    model: str | None = None,
+) -> list[str]:
+    """The claude CLI argv for one run.
+
+    The jurisdiction gate (``cli_gate``) and permission pre-approval
+    (``preapprove``) are independent settings. Previously the gate sat
+    inside the pre-approval branch, so --no-skip-permissions silently
+    dropped it.
+
+    --strict-mcp-config is always passed. The council needs no MCP servers,
+    and without it every connector the user has (mail, drive, etc.) is
+    exposed to a model that is processing untrusted decision text.
+    """
+    cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose", "--strict-mcp-config"]
+    # The command's own `model: opus` covers only the turn that runs the
+    # command. Confirmed live 2026-11-14: after async subagent results
+    # arrived as task notifications, later CEO turns (including the final
+    # synthesis) ran on the session default model instead (claude-sonnet-5,
+    # 1 of 31 runs). Passing the same model for the whole session keeps
+    # every CEO turn on the model council.md asks for.
+    if model:
+        cmd += ["--model", model]
+    flags = compute_tool_flags(decision_text)
+    if cli_gate:
+        cmd += ["--tools", flags["tools"]]
+        if flags["disallowed"]:
+            cmd += ["--disallowedTools", flags["disallowed"]]
+    if preapprove:
+        cmd += ["--allowedTools", flags["allowed"]]
+    return cmd
+
+
+def run_council(
+    decision_text: str,
+    workspace: Path,
+    claude_bin: str,
+    *,
+    preapprove: bool,
+    cli_gate: bool,
+    timeout: int,
+    audit_log: Path,
+):
+    """Runs one council in ``workspace``. Returns (stdout, stderr, returncode, error)."""
+    # The prompt goes in via stdin, not as an inline -p argument. Confirmed
+    # live 2026-09-15: on Windows the claude.cmd npm shim re-parses inline
+    # arguments through cmd.exe and silently truncated a multi-line prompt
+    # at its first newline (the CEO saw only "jurisdiction: unspecified").
+    prompt = f"/{HARNESS_COMMAND} {decision_text}"
+    cmd = build_command(decision_text, claude_bin, preapprove=preapprove, cli_gate=cli_gate, model=command_model())
+    env = {**os.environ, "COUNCIL_GATE_AUDIT_LOG": str(audit_log)}
     try:
         proc = subprocess.run(
             cmd,
-            cwd=str(REPO_ROOT),
+            cwd=str(workspace),
             input=prompt,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=env,
+            check=False,
         )
-        return proc.stdout, proc.stderr, proc.returncode, None
     except FileNotFoundError:
         return "", "", None, f"'{claude_bin}' was not found on PATH"
     except subprocess.TimeoutExpired as e:
-        return e.stdout or "", e.stderr or "", None, f"timed out after {timeout}s"
+        return _as_text(e.stdout), _as_text(e.stderr), None, f"timed out after {timeout}s"
+    return proc.stdout, proc.stderr, proc.returncode, None
+
+
+def _as_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def read_audit_log(path: Path) -> list[dict]:
+    entries = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def cli_error_result(raw_stdout: str) -> str | None:
+    """Text of a CLI-level error that ended the run, or None.
+
+    Confirmed live 2026-11-14: when the account's session usage limit is
+    hit, the CLI ends the run with a ``result`` event carrying
+    ``is_error: true`` and text like "You've hit your session limit". That
+    is an infrastructure failure, not a council failure, so it must not be
+    scored as one (the 2026-09-15 batch had to be discarded by hand for
+    exactly this reason).
+    """
+    error = None
+    for line in raw_stdout.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result" and obj.get("is_error"):
+            error = str(obj.get("result") or obj.get("subtype") or "unknown CLI error")
+    return error
+
+
+def extract_run_metadata(raw_stdout: str) -> dict:
+    """Exact model IDs and CLI version seen in a transcript.
+
+    The agent files say ``model: haiku`` and the command says
+    ``model: opus``. Those are aliases; this records which model IDs
+    actually answered. Subagent messages are attributed through their
+    ``parent_tool_use_id`` to the Agent call that launched them.
+    """
+    meta = {"claude_code_version": None, "session_model": None, "ceo_models": set(), "subagent_models": {}}
+    agent_by_tool_id: dict[str, str] = {}
+    nested: list[tuple[str, str]] = []
+    for line in raw_stdout.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "system" and obj.get("subtype") == "init":
+            meta["claude_code_version"] = meta["claude_code_version"] or obj.get("claude_code_version")
+            meta["session_model"] = meta["session_model"] or obj.get("model")
+        if obj.get("type") != "assistant":
+            continue
+        message = obj.get("message") or {}
+        for block in message.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
+                agent_by_tool_id[block.get("id")] = (block.get("input") or {}).get("subagent_type") or "?"
+        model = message.get("model")
+        if not model:
+            continue
+        parent = obj.get("parent_tool_use_id")
+        if parent is None:
+            meta["ceo_models"].add(model)
+        else:
+            nested.append((parent, model))
+    for parent, model in nested:
+        meta["subagent_models"].setdefault(agent_by_tool_id.get(parent, "?"), set()).add(model)
+    return {
+        "claude_code_version": meta["claude_code_version"],
+        "session_model": meta["session_model"],
+        "ceo_models": sorted(meta["ceo_models"]),
+        "subagent_models": {k: sorted(v) for k, v in sorted(meta["subagent_models"].items())},
+    }
 
 
 # --------------------------------------------------------------------------
@@ -720,8 +898,20 @@ def run_council(decision_text: str, claude_bin: str, skip_permissions: bool, tim
 # --------------------------------------------------------------------------
 
 
-def evaluate_run(task_calls, final_text, expected: dict, raw_stdout: str | None = None):
+def evaluate_run(
+    task_calls,
+    final_text,
+    expected: dict,
+    raw_stdout: str | None = None,
+    audit_entries: list[dict] | None = None,
+    regulatory_tool_available: bool | None = None,
+):
     """Runs checks (a)-(e) against one parsed transcript. Returns a result dict.
+
+    `audit_entries` is the jurisdiction-gate hook's audit log for the run
+    (a second, transcript-independent signal for check (e)).
+    `regulatory_tool_available=False` makes check (e) n/a for an example
+    that expects the query to run, since it can't succeed without the CLI.
 
     `raw_stdout`, when given, is the full raw transcript text -- used by
     check (e) to mechanically detect whether the saudi-law-tracker Bash
@@ -766,18 +956,23 @@ def evaluate_run(task_calls, final_text, expected: dict, raw_stdout: str | None 
     # (b) every subagent reply valid JSON matching schema
     subagent_ok = True
     per_agent_schema_errors = {}
+    seen: Counter = Counter()
     for tc in task_calls:
         agent = tc["subagent_type"] or "?"
+        seen[agent] += 1
+        # A repeated agent (cto/chro regulatory follow-up) gets its own key,
+        # so the second reply's result can't overwrite the first's errors.
+        key = agent if seen[agent] == 1 else f"{agent}#{seen[agent]}"
         parsed, parse_err = extract_json(tc["result_text"])
         if parsed is None:
             subagent_ok = False
-            per_agent_schema_errors[agent] = [f"invalid JSON: {parse_err}"]
+            per_agent_schema_errors[key] = [f"invalid JSON: {parse_err}"]
             continue
         expected_role = agent[:-len("-agent")] if agent.endswith("-agent") else None
         errs = validate_subagent_schema(parsed, expected_role=expected_role)
         if errs:
             subagent_ok = False
-        per_agent_schema_errors[agent] = errs
+        per_agent_schema_errors[key] = errs
     result["checks"]["b_subagent_schema_valid"] = subagent_ok
     result["subagent_schema_errors"] = per_agent_schema_errors
     if not subagent_ok:
@@ -835,24 +1030,36 @@ def evaluate_run(task_calls, final_text, expected: dict, raw_stdout: str | None 
     # no raw transcript is available (older self-test callers), this falls
     # back to the self-reported field alone.
     expected_regulatory = expected.get("expected_regulatory_context_consulted")
-    if expected_regulatory is not None:
+    if expected_regulatory is not None and regulatory_tool_available is False and expected_regulatory:
+        # A positive-path example can't pass (e) on a machine without the
+        # saudi-law-tracker CLI. Report n/a rather than a false failure.
+        result["checks"]["e_regulatory_consulted_expected"] = None
+        result["errors"].append(
+            "check (e) skipped: saudi-law-tracker CLI not found (set SAUDI_LAW_TRACKER or put it on PATH)"
+        )
+    elif expected_regulatory is not None:
         actual_self_report = council_parsed.get("regulatory_context_consulted") if council_parsed else None
         if raw_stdout is not None:
-            actual_bash_invoked = regulatory_bash_query_invoked(raw_stdout)
+            actual_bash_invoked = regulatory_bash_query_invoked(raw_stdout, audit_entries)
             e_ok = actual_bash_invoked == expected_regulatory
-            result["checks"]["e_regulatory_consulted_expected"] = e_ok
             if not e_ok:
+                why = (
+                    "this example's jurisdiction is Saudi and the decision is regulatory, so the query should have run"
+                    if expected_regulatory
+                    else "this example's jurisdiction: field is not a recognized Saudi value, so the "
+                    "saudi-law-tracker query should never run (see council.md step 4)"
+                )
                 result["errors"].append(
-                    f"regulatory Bash step actually invoked={actual_bash_invoked}, expected {expected_regulatory!r} "
-                    "-- decision.md's jurisdiction: field for this example does not name a recognized Saudi "
-                    "jurisdiction, so the saudi-law-tracker query should never run (see council.md step 4)"
+                    f"regulatory query actually ran={actual_bash_invoked}, expected {expected_regulatory!r} -- {why}"
                 )
             if actual_self_report is not None and actual_self_report != actual_bash_invoked:
+                e_ok = False
                 result["errors"].append(
                     f"CEO self-reported regulatory_context_consulted={actual_self_report!r} does not match "
-                    f"the actual Bash invocation ({actual_bash_invoked!r}) found in the transcript -- the "
-                    "self-report is not trustworthy on its own, which is why check (e) reads the transcript directly"
+                    f"whether the query actually ran ({actual_bash_invoked!r}) -- the self-report is not "
+                    "trustworthy on its own, which is why check (e) reads the transcript directly"
                 )
+            result["checks"]["e_regulatory_consulted_expected"] = e_ok
         else:
             e_ok = actual_self_report == expected_regulatory if actual_self_report is not None else None
             result["checks"]["e_regulatory_consulted_expected"] = e_ok
@@ -882,45 +1089,152 @@ def discover_examples():
     return examples
 
 
-def run_example(example_dir: Path, runs: int, claude_bin: str, skip_permissions: bool, timeout: int, log_dir: Path):
-    decision_text = (example_dir / "decision.md").read_text(encoding="utf-8").strip()
-    expected = json.loads((example_dir / "expected.json").read_text(encoding="utf-8"))
-
-    run_results = []
-    for i in range(1, runs + 1):
-        stage_example(example_dir)
-        try:
-            stdout, stderr, returncode, run_error = run_council(decision_text, claude_bin, skip_permissions, timeout)
-        finally:
-            pass  # context is restored once for the whole example in run_all()
-
-        example_log_dir = log_dir / example_dir.name
-        example_log_dir.mkdir(parents=True, exist_ok=True)
-        (example_log_dir / f"run-{i}.stdout.jsonl").write_text(stdout, encoding="utf-8")
-        if stderr:
-            (example_log_dir / f"run-{i}.stderr.txt").write_text(stderr, encoding="utf-8")
-
-        if run_error:
-            run_results.append({
-                "run": i,
-                "checks": {},
-                "final_decision": None,
-                "errors": [f"CLI invocation failed: {run_error}"],
-                "all_pass": False,
-            })
-            continue
-
-        task_calls, final_text = parse_transcript(stdout)
-        result = evaluate_run(task_calls, final_text, expected, raw_stdout=stdout)
-        result["run"] = i
-        result["returncode"] = returncode
-        run_results.append(result)
-
+def summarize_audit(entries: list[dict]) -> dict:
+    """Compact view of what the jurisdiction-gate hook saw during a run."""
+    starts = [e for e in entries if e.get("event") == "council_start"]
+    pretool = [e for e in entries if e.get("event") == "pretool"]
     return {
-        "example": example_dir.name,
-        "expected": expected,
-        "runs": run_results,
+        "hook_saw_council_start": bool(starts),
+        "jurisdiction_seen_by_hook": starts[-1].get("jurisdiction") if starts else None,
+        "shell_calls_denied": sum(1 for e in pretool if e.get("decision") == "deny"),
+        "shell_calls_denied_in_subagents": sum(1 for e in pretool if e.get("decision") == "deny" and e.get("agent_id")),
+        "regulatory_calls_executed": sum(1 for e in entries if e.get("event") == "posttool" and e.get("regulatory")),
     }
+
+
+def run_one(example_dir: Path, run_index: int, decision_text: str, expected: dict, options, log_dir: Path) -> dict:
+    """One council run in its own workspace, evaluated. Safe to call from a thread."""
+    example_log_dir = log_dir / example_dir.name
+    example_log_dir.mkdir(parents=True, exist_ok=True)
+    audit_log = example_log_dir / f"run-{run_index}.gate-audit.jsonl"
+    audit_log.unlink(missing_ok=True)
+    print(f"  starting {example_dir.name} run {run_index}", flush=True)
+
+    workspace = build_workspace(example_dir, options.subagent_model)
+    try:
+        stdout, stderr, returncode, run_error = run_council(
+            decision_text,
+            workspace,
+            options.claude_bin,
+            preapprove=options.preapprove,
+            cli_gate=options.cli_gate,
+            timeout=options.timeout,
+            audit_log=audit_log,
+        )
+    finally:
+        remove_workspace(workspace)
+
+    (example_log_dir / f"run-{run_index}.stdout.jsonl").write_text(stdout, encoding="utf-8")
+    if stderr:
+        (example_log_dir / f"run-{run_index}.stderr.txt").write_text(stderr, encoding="utf-8")
+    audit_entries = read_audit_log(audit_log)
+    base = {
+        "run": run_index,
+        "transcript_sha256": hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+        "metadata": extract_run_metadata(stdout),
+        "gate_audit": summarize_audit(audit_entries),
+    }
+
+    cli_error = None if run_error else cli_error_result(stdout)
+    if run_error or cli_error:
+        result = {
+            **base,
+            "checks": {},
+            "final_decision": None,
+            "errors": [f"CLI invocation failed: {run_error}" if run_error else f"CLI reported an error: {cli_error}"],
+            "all_pass": False,
+            # Not evidence about the council either way: excluded from the
+            # check tallies and pass rates, and counted separately.
+            "infra_error": True,
+        }
+    else:
+        task_calls, final_text = parse_transcript(stdout)
+        tool_available = options.regulatory_tool_available if expected.get("requires_regulatory_tool") else None
+        result = evaluate_run(
+            task_calls,
+            final_text,
+            expected,
+            raw_stdout=stdout,
+            audit_entries=audit_entries,
+            regulatory_tool_available=tool_available,
+        )
+        result.update(base)
+        result["returncode"] = returncode
+    print(f"  finished {example_dir.name} run {run_index}: {'PASS' if result['all_pass'] else 'FAIL'}", flush=True)
+    return result
+
+
+def run_all(examples: list[Path], runs: int, options, log_dir: Path, jobs: int) -> list[dict]:
+    """Runs every (example, run) pair, up to ``jobs`` at a time.
+
+    Parallel runs are safe because each one has its own workspace.
+    """
+    loaded = []
+    tasks = []
+    for example_dir in examples:
+        decision_text = (example_dir / "decision.md").read_text(encoding="utf-8").strip()
+        expected = json.loads((example_dir / "expected.json").read_text(encoding="utf-8"))
+        loaded.append((example_dir, expected))
+        tasks.extend((example_dir, i, decision_text, expected) for i in range(1, runs + 1))
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        futures = [pool.submit(run_one, ex, i, text, exp, options, log_dir) for ex, i, text, exp in tasks]
+        results = [f.result() for f in futures]
+
+    by_example: dict[str, list[dict]] = {}
+    for (example_dir, _, _, _), result in zip(tasks, results, strict=True):
+        by_example.setdefault(example_dir.name, []).append(result)
+    return [
+        {"example": example_dir.name, "expected": expected, "runs": by_example.get(example_dir.name, [])}
+        for example_dir, expected in loaded
+    ]
+
+
+def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a pass rate.
+
+    Used instead of the plain ratio because at n=3 or n=9, "3/3" or "9/9"
+    is consistent with a true rate well below 100%.
+    """
+    if n <= 0:
+        return 0.0, 1.0
+    p = successes / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def format_rate(successes: int, n: int) -> str:
+    if n == 0:
+        return "0/0"
+    lo, hi = wilson_interval(successes, n)
+    return f"{successes}/{n} (95% CI {lo * 100:.0f}-{hi * 100:.0f}%)"
+
+
+CHECK_LABELS = {
+    "a_five_invocations": "(a) all 5 roles called",
+    "a_five_distinct_roles": "(a) repeats legitimate",
+    "b_subagent_schema_valid": "(b) subagent schema",
+    "c_council_schema_valid": "(c) council schema",
+    "d_final_decision_expected": "(d) matches expected",
+    "e_regulatory_consulted_expected": "(e) regulatory step correct",
+}
+
+
+def check_tallies(runs: list[dict]) -> dict[str, tuple[int, int]]:
+    """Per-check (passed, applicable) counts; n/a results are not counted."""
+    tallies = {}
+    runs = [r for r in runs if not r.get("infra_error")]
+    for key in CHECK_LABELS:
+        values = [r.get("checks", {}).get(key) for r in runs]
+        if any(not r.get("checks") for r in runs):
+            # A run whose CLI invocation failed has no checks at all; count
+            # it as a failure of every check rather than silently dropping it.
+            values = [v if r.get("checks") else False for v, r in zip(values, runs, strict=True)]
+        applicable = [v for v in values if v is not None]
+        tallies[key] = (sum(1 for v in applicable if v), len(applicable))
+    return tallies
 
 
 def summarize(example_result: dict):
@@ -928,59 +1242,104 @@ def summarize(example_result: dict):
     decisions = [r["final_decision"] for r in runs]
     decision_counts = Counter(decisions)
     most_common_decision, most_common_count = (decision_counts.most_common(1) or [(None, 0)])[0]
-    agreement = most_common_count / len(runs) if runs else 0.0
-    all_checks_pass = [r.get("all_pass", False) for r in runs]
+    passed = sum(1 for r in runs if r.get("all_pass"))
+    infra = sum(1 for r in runs if r.get("infra_error"))
     return {
+        "infra_errors": infra,
+        "runs_scored": len(runs) - infra,
         "decisions": decisions,
         "decision_counts": dict(decision_counts),
-        "agreement_ratio": agreement,
-        "runs_passed": sum(1 for p in all_checks_pass if p),
+        "most_common_decision": most_common_decision,
+        "agreement_ratio": most_common_count / len(runs) if runs else 0.0,
+        "runs_passed": passed,
         "runs_total": len(runs),
+        "pass_rate_95ci": wilson_interval(passed, len(runs)),
+        "check_tallies": check_tallies(runs),
     }
 
 
-def print_report(all_results: list[dict]) -> bool:
+def _models_line(runs: list[dict]) -> str:
+    versions, ceo, sub = set(), set(), set()
+    for r in runs:
+        meta = r.get("metadata") or {}
+        if meta.get("claude_code_version"):
+            versions.add(meta["claude_code_version"])
+        ceo.update(meta.get("ceo_models") or [])
+        for models in (meta.get("subagent_models") or {}).values():
+            sub.update(models)
+    return (
+        f"Claude Code {', '.join(sorted(versions)) or '?'}; CEO model(s): {', '.join(sorted(ceo)) or '?'}; "
+        f"subagent model(s): {', '.join(sorted(sub)) or '?'}"
+    )
+
+
+def print_report(all_results: list[dict], settings: dict) -> bool:
     """Prints a markdown report to stdout. Returns True if every run of every
     example fully passed."""
     overall_ok = True
     print("# /council validation report\n")
     print(f"Generated: {datetime.now(timezone.utc).isoformat()}\n")
+    print(
+        f"Settings: CLI gate {'on' if settings['cli_gate'] else 'OFF (hook only)'}; "
+        f"tool pre-approval {'on' if settings['preapprove'] else 'off'}; "
+        f"subagent model override: {settings['subagent_model'] or 'none'}; "
+        f"saudi-law-tracker CLI: {'found' if settings['regulatory_tool_available'] else 'NOT found'}\n"
+    )
 
+    def mark(v):
+        if v is True:
+            return "PASS"
+        if v is False:
+            return "FAIL"
+        return "n/a"
+
+    all_runs = []
     for ex in all_results:
         summary = summarize(ex)
+        all_runs.extend(ex["runs"])
         print(f"## {ex['example']}\n")
         print(f"Expected final_decision in: {ex['expected'].get('acceptable_final_decisions')}\n")
-        print("| run | (a) all 5 roles called | (a) repeats legitimate | (b) subagent schema | (c) council schema | (d) matches expected | (e) regulatory consulted | final_decision | overall |")
-        print("|---|---|---|---|---|---|---|---|---|")
+        print("| run | " + " | ".join(CHECK_LABELS.values()) + " | final_decision | overall |")
+        print("|---" * (len(CHECK_LABELS) + 3) + "|")
         for r in ex["runs"]:
             checks = r.get("checks", {})
-            def mark(v):
-                if v is True:
-                    return "PASS"
-                if v is False:
-                    return "FAIL"
-                return "n/a"
             row_pass = r.get("all_pass", False)
             if not row_pass:
                 overall_ok = False
-            print(
-                f"| {r['run']} | {mark(checks.get('a_five_invocations'))} | "
-                f"{mark(checks.get('a_five_distinct_roles'))} | {mark(checks.get('b_subagent_schema_valid'))} | "
-                f"{mark(checks.get('c_council_schema_valid'))} | {mark(checks.get('d_final_decision_expected'))} | "
-                f"{mark(checks.get('e_regulatory_consulted_expected'))} | "
-                f"{r.get('final_decision')} | {'PASS' if row_pass else 'FAIL'} |"
-            )
-            if r.get("errors"):
-                for err in r["errors"]:
-                    print(f"  - note (run {r['run']}): {err}")
+            cells = " | ".join(mark(checks.get(k)) for k in CHECK_LABELS)
+            print(f"| {r['run']} | {cells} | {r.get('final_decision')} | {'PASS' if row_pass else 'FAIL'} |")
+            for err in r.get("errors") or []:
+                print(f"  - note (run {r['run']}): {err}")
+            audit = r.get("gate_audit") or {}
+            if audit.get("shell_calls_denied") or audit.get("regulatory_calls_executed"):
+                print(
+                    f"  - gate (run {r['run']}): hook denied {audit['shell_calls_denied']} shell call(s) "
+                    f"({audit['shell_calls_denied_in_subagents']} in subagents); "
+                    f"saudi-law-tracker executed {audit['regulatory_calls_executed']} time(s)"
+                )
         print()
         print(
-            f"**Agreement across {summary['runs_total']} runs:** "
-            f"{summary['decision_counts']} "
-            f"({summary['agreement_ratio']*100:.0f}% agreed on the most common outcome); "
-            f"{summary['runs_passed']}/{summary['runs_total']} runs fully passed all checks.\n"
+            f"**Agreement across {summary['runs_total']} runs:** {summary['decision_counts']} "
+            f"({summary['agreement_ratio'] * 100:.0f}% agreed on the most common outcome, "
+            f"{summary['most_common_decision']!r}); runs fully passing all checks: "
+            f"{format_rate(summary['runs_passed'], summary['runs_scored'])}"
+            + (f"; {summary['infra_errors']} run(s) excluded as CLI/infrastructure errors" if summary["infra_errors"] else "")
+            + ".\n"
         )
+        print(f"Models: {_models_line(ex['runs'])}\n")
 
+    print("## All examples\n")
+    total_passed = sum(1 for r in all_runs if r.get("all_pass"))
+    scored = [r for r in all_runs if not r.get("infra_error")]
+    infra = len(all_runs) - len(scored)
+    print(
+        f"Runs fully passing all checks: {format_rate(total_passed, len(scored))}"
+        + (f" ({infra} run(s) excluded as CLI/infrastructure errors)" if infra else "")
+        + "\n"
+    )
+    for key, (passed, applicable) in check_tallies(all_runs).items():
+        print(f"- {CHECK_LABELS[key]}: {format_rate(passed, applicable)}")
+    print(f"\nModels: {_models_line(all_runs)}\n")
     print("---")
     print(f"\n**Overall: {'ALL CHECKS PASSED' if overall_ok else 'SOME CHECKS FAILED'}**\n")
     return overall_ok
@@ -1008,12 +1367,12 @@ def _make_tool_result(tool_id, text):
     return {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
 
 
-def _make_bash_tool_use_block(tool_id, command='"${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector labor --json'):
+def _make_bash_tool_use_block(tool_id, command='"${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector labor --json', name="Bash"):
     """Council.md step 5's regulatory query, as it actually appears in a raw
     transcript -- used to give regulatory_bash_query_invoked something real
     to detect in self-test fixtures, rather than only ever testing against
     the CEO's self-reported field."""
-    return {"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": command}}
+    return {"type": "tool_use", "id": tool_id, "name": name, "input": {"command": command}}
 
 
 def _make_bash_disabled_error_result(tool_id):
@@ -1474,6 +1833,60 @@ def build_raw_control_char_council_reply_transcript():
     return "\n".join(lines)
 
 
+def build_nested_regulatory_call_transcript():
+    """A non-Saudi run where the CEO delegates the saudi-law-tracker query
+    to a general-purpose subagent and that subagent's PowerShell call
+    succeeds. The CLI streams subagent events with parent_tool_use_id set,
+    so check (e) must catch it even though the CEO itself never ran a
+    shell command."""
+    council_reply = json.dumps({
+        "final_decision": "insufficient_data",
+        "confidence": "high",
+        "regulatory_context_consulted": False,
+        "council_summary": {r: {"recommendation": "insufficient_data", "confidence": "high"} for r in COUNCIL_SUMMARY_KEYS},
+        "key_disagreements": [],
+        "reasoning": "No jurisdiction was specified.",
+    })
+    lines = []
+    content = [_make_task_use_block(f"toolu_{a}", a) for a in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]]
+    content.append(_make_task_use_block("toolu_gp", "general-purpose", "run query", "run saudi-law-tracker query"))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": content}}))
+    for a in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]:
+        lines.append(_fixture_line(_make_tool_result(f"toolu_{a}", _good_subagent_reply(a[:-len("-agent")]))))
+    nested_call = _make_bash_tool_use_block("toolu_nested", command="saudi-law-tracker query --sector labor --json", name="PowerShell")
+    lines.append(_fixture_line({"type": "assistant", "parent_tool_use_id": "toolu_gp", "message": {"role": "assistant", "model": "claude-haiku-test", "content": [nested_call]}}))
+    nested_result = _make_tool_result("toolu_nested", '[{"title": "x"}]')
+    nested_result["parent_tool_use_id"] = "toolu_gp"
+    lines.append(_fixture_line(nested_result))
+    lines.append(_fixture_line(_make_tool_result("toolu_gp", "ran it")))
+    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-test", "content": [{"type": "text", "text": council_reply}]}}))
+    return "\n".join(lines)
+
+
+def _run_hook(payload: dict, env: dict) -> dict | None:
+    """Runs .claude/hooks/jurisdiction_gate.py as a real subprocess, exactly
+    as Claude Code does, and returns its parsed stdout JSON (None if empty)."""
+    proc = subprocess.run(
+        [sys.executable, str(GATE_PATH)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    if proc.returncode != 0:
+        msg = f"hook exited {proc.returncode}: {proc.stderr}"
+        raise RuntimeError(msg)
+    out = proc.stdout.strip()
+    return json.loads(out) if out else None
+
+
+def _hook_denied(output: dict | None) -> bool:
+    return bool(output) and output.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+
 def self_test() -> bool:
     ok = True
 
@@ -1594,7 +2007,7 @@ def self_test() -> bool:
         {"acceptable_final_decisions": ["insufficient_data"], "expected_regulatory_context_consulted": False},
         raw_stdout=mismatch_raw,
     )
-    mismatch_flagged = any("does not match the actual Bash invocation" in e for e in result["errors"])
+    mismatch_flagged = any("does not match whether the query actually ran" in e for e in result["errors"])
     if result["checks"]["e_regulatory_consulted_expected"] is False and mismatch_flagged:
         print("  PASS (self-report/transcript mismatch correctly caught -- "
               "a false self-report alone would have wrongly passed this run)")
@@ -1621,38 +2034,41 @@ def self_test() -> bool:
               f"not fail the whole run on it): {result}")
         ok = False
 
-    print("Self-test 11: jurisdiction: field extraction and the code-level Bash-gating "
-          "decision it drives (compute_tool_flags) -- no CLI invocation, pure logic. "
-          "Gate is --disallowedTools, not omission from --allowedTools -- confirmed live "
-          "2026-09-16 that omission alone does not actually deny a tool call...")
+    print("Self-test 11: jurisdiction: field extraction and the CLI-level gating decision it drives "
+          "(compute_tool_flags) -- pure logic, no CLI...")
+    saudi_flags = {"tools": "Agent,Task,Read,Grep,Glob,Bash", "allowed": "Agent,Task,Read,Grep,Glob,Bash", "disallowed": None}
+    other_flags = {"tools": "Agent,Task,Read,Grep,Glob", "allowed": "Agent,Task,Read,Grep,Glob", "disallowed": "Bash,PowerShell"}
     cases = [
-        ("jurisdiction: KSA\n\nProposal: text", "KSA", True, "Agent,Task,Bash", None),
-        ("jurisdiction: Saudi Arabia\n\nProposal: text", "Saudi Arabia", True, "Agent,Task,Bash", None),
-        ("jurisdiction: saudi arabia\n\nProposal: text", "saudi arabia", True, "Agent,Task,Bash", None),  # case-insensitive
-        ("jurisdiction: unspecified\n\nProposal: text", "unspecified", False, "Agent,Task", "Bash"),
-        ("jurisdiction: EU\n\nProposal: text", "EU", False, "Agent,Task", "Bash"),
-        ("Proposal: no jurisdiction line at all", None, False, "Agent,Task", "Bash"),  # missing field == unspecified
-        ("Jurisdiction:   KSA  \n\nProposal: text", "KSA", True, "Agent,Task,Bash", None),  # whitespace/case in the label
+        ("jurisdiction: KSA\n\nProposal: text", "KSA", True),
+        ("jurisdiction: Saudi Arabia\n\nProposal: text", "Saudi Arabia", True),
+        ("jurisdiction: saudi arabia\n\nProposal: text", "saudi arabia", True),  # case-insensitive
+        ("jurisdiction: Kingdom of Saudi Arabia\n\nProposal: text", "Kingdom of Saudi Arabia", True),
+        ("jurisdiction: KSA (Riyadh)\n\nProposal: text", "KSA (Riyadh)", True),  # parenthetical ignored
+        ("jurisdiction: K.S.A.\n\nProposal: text", "K.S.A.", True),
+        ("jurisdiction: Riyadh, KSA\n\nProposal: text", "Riyadh, KSA", True),  # any listed entry counts
+        ("jurisdiction: KSA / UAE\n\nProposal: text", "KSA / UAE", True),
+        ("jurisdiction: unspecified\n\nProposal: text", "unspecified", False),
+        ("jurisdiction: EU\n\nProposal: text", "EU", False),
+        ("jurisdiction: EU (not KSA)\n\nProposal: text", "EU (not KSA)", False),
+        ("jurisdiction: non-Saudi\n\nProposal: text", "non-Saudi", False),
+        ("jurisdiction: SA\n\nProposal: text", "SA", False),  # ambiguous with South Africa
+        ("jurisdiction:\n\nKSA", "", False),  # a blank value must not swallow the next line
+        ("Proposal: no jurisdiction line at all", None, False),  # missing field == unspecified
+        ("Jurisdiction:   KSA  \n\nProposal: text", "KSA", True),  # whitespace/case in the label
     ]
     jurisdiction_ok = True
-    for decision_text, expected_field, expected_recognized, expected_allowed, expected_disallowed in cases:
+    for decision_text, expected_field, expected_recognized in cases:
         field = extract_jurisdiction_field(decision_text)
         recognized = is_recognized_saudi_jurisdiction(field)
-        allowed, disallowed = compute_tool_flags(decision_text)
-        if (
-            field != expected_field
-            or recognized != expected_recognized
-            or allowed != expected_allowed
-            or disallowed != expected_disallowed
-        ):
+        flags = compute_tool_flags(decision_text)
+        expected_flags = saudi_flags if expected_recognized else other_flags
+        if field != expected_field or recognized != expected_recognized or flags != expected_flags:
             jurisdiction_ok = False
-            print(f"  FAIL for {decision_text[:40]!r}: got field={field!r} recognized={recognized} "
-                  f"allowed={allowed!r} disallowed={disallowed!r}, expected field={expected_field!r} "
-                  f"recognized={expected_recognized} allowed={expected_allowed!r} disallowed={expected_disallowed!r}")
+            print(f"  FAIL for {decision_text[:40]!r}: got field={field!r} recognized={recognized} flags={flags}, "
+                  f"expected field={expected_field!r} recognized={expected_recognized} flags={expected_flags}")
     if jurisdiction_ok:
-        print("  PASS (all extraction/gating cases correct, including case-insensitivity, "
-              "whitespace tolerance, a missing field defaulting to unspecified, and Bash landing "
-              "in --disallowedTools rather than merely being left out of --allowedTools)")
+        print(f"  PASS ({len(cases)} extraction/gating cases: aliases, parentheticals, lists, negations, "
+              "a blank value and a missing field; both shell tools disallowed for non-Saudi values)")
     else:
         ok = False
 
@@ -1674,6 +2090,177 @@ def self_test() -> bool:
         print(f"  FAIL (an attempt that returned no real data should not fail check (e)): {result}")
         ok = False
 
+
+    print("Self-test 13: jurisdiction-gate hook, run as a real subprocess with real hook payloads...")
+    with tempfile.TemporaryDirectory() as state_dir:
+        audit_path = Path(state_dir) / "audit.jsonl"
+        env = {**os.environ, "COUNCIL_GATE_STATE_DIR": state_dir, "COUNCIL_GATE_AUDIT_LOG": str(audit_path)}
+        sid = "selftest-session"
+
+        def prompt(text):
+            return _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": sid, "prompt": text}, env)
+
+        def shell(command, tool="Bash", agent_id=None):
+            payload = {"hook_event_name": "PreToolUse", "session_id": sid, "tool_name": tool, "tool_input": {"command": command}}
+            if agent_id:
+                payload["agent_id"] = agent_id
+            return _hook_denied(_run_hook(payload, env))
+
+        query = '"${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector labor --json'
+        hook_cases = []
+        prompt("/council jurisdiction: unspecified\n\nShould we do X?")
+        hook_cases.append(("non-Saudi council: CEO Bash query denied", shell(query), True))
+        hook_cases.append(("non-Saudi council: CEO PowerShell query denied", shell(query, tool="PowerShell"), True))
+        hook_cases.append(("non-Saudi council: any shell command denied", shell("echo hi"), True))
+        hook_cases.append(("non-Saudi council: query delegated to a subagent denied", shell(query, agent_id="a1"), True))
+        prompt("<task-notification>\n<task-id>a1</task-id>\n</task-notification>")
+        hook_cases.append(("task-notification keeps the council state", shell(query), True))
+        prompt("/council-under-test jurisdiction: KSA (Riyadh)\n\nHiring plan?")
+        hook_cases.append(("Saudi council (harness command name): query allowed", shell(query), False))
+        hook_cases.append(("Saudi council: unrelated shell command denied", shell("rm -rf context"), True))
+        prompt("thanks, now list the files")
+        hook_cases.append(("after a normal prompt: ordinary shell command allowed", shell("ls"), False))
+        hook_cases.append(("outside /council: query denied (fail closed)", shell(query), True))
+        _run_hook({"hook_event_name": "PostToolUse", "session_id": sid, "tool_name": "Bash",
+                   "tool_input": {"command": query}, "tool_response": {"stdout": "[]"}}, env)
+        audit = read_audit_log(audit_path)
+        hook_cases.append(("PostToolUse of the query is audited", any(a.get("event") == "posttool" for a in audit), True))
+        hook_cases.append(("subagent denial recorded with agent_id",
+                           any(a.get("decision") == "deny" and a.get("agent_id") == "a1" for a in audit), True))
+        _run_hook({"hook_event_name": "SessionEnd", "session_id": sid}, env)
+        hook_cases.append(("SessionEnd removes the state file", any(Path(state_dir).glob(f"{sid}.json")), False))
+    hook_ok = True
+    for label, got, want in hook_cases:
+        if got != want:
+            hook_ok = False
+            print(f"  FAIL: {label}: got {got}, expected {want}")
+    if hook_ok:
+        print(f"  PASS ({len(hook_cases)} hook decisions correct, including subagent delegation and PowerShell)")
+    else:
+        ok = False
+
+    print("Self-test 14: a regulatory query delegated to a subagent (nested PowerShell call) on a non-Saudi "
+          "example must fail check (e); the audit log alone must also be enough to detect a run...")
+    nested_raw = build_nested_regulatory_call_transcript()
+    task_calls, final_text = parse_transcript(nested_raw)
+    task_calls = [tc for tc in task_calls if tc["subagent_type"] in EXPECTED_AGENTS]
+    nested_result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["insufficient_data"],
+                                 "expected_regulatory_context_consulted": False}, raw_stdout=nested_raw)
+    audit_only = regulatory_bash_query_invoked(build_good_transcript(), [{"event": "posttool", "regulatory": True}])
+    if nested_result["checks"]["e_regulatory_consulted_expected"] is False and audit_only:
+        print("  PASS (nested call detected from the transcript; audit-log signal detected on its own)")
+    else:
+        print(f"  FAIL: nested={nested_result['checks']} audit_only={audit_only}")
+        ok = False
+
+    print("Self-test 15: the jurisdiction gate must not depend on --no-preapprove (it used to be dropped "
+          "with --no-skip-permissions), --no-cli-gate must leave it to the hook, MCP is always stripped...")
+    non_saudi = "jurisdiction: unspecified\n\nProposal: x"
+    no_preapprove = build_command(non_saudi, "claude", preapprove=False, cli_gate=True)
+    hook_only = build_command(non_saudi, "claude", preapprove=True, cli_gate=False)
+    saudi = build_command("jurisdiction: KSA\n\nProposal: x", "claude", preapprove=True, cli_gate=True)
+    cmd_ok = (
+        "--tools" in no_preapprove and "--disallowedTools" in no_preapprove and "--allowedTools" not in no_preapprove
+        and "--tools" not in hook_only and "--disallowedTools" not in hook_only
+        and "Bash" in saudi[saudi.index("--tools") + 1] and "--disallowedTools" not in saudi
+        and all("--strict-mcp-config" in c for c in (no_preapprove, hook_only, saudi))
+        and command_model() == "opus"
+        and "--model" in build_command(non_saudi, "claude", preapprove=True, cli_gate=True, model="opus")
+    )
+    if cmd_ok:
+        print("  PASS")
+    else:
+        print(f"  FAIL: no_preapprove={no_preapprove} hook_only={hook_only} saudi={saudi}")
+        ok = False
+
+    print("Self-test 16: isolated workspace -- fixtures and renamed command land in a temp copy, the repo's own "
+          "context/ is untouched, --subagent-model rewrites only the copy, and cleanup removes it...")
+    repo_context = REPO_ROOT / "context"
+
+    def snapshot():
+        return sorted(str(q.relative_to(repo_context)) for q in repo_context.rglob("*")) if repo_context.exists() else []
+
+    agent_text_before = (CLAUDE_DIR / "agents" / "cfo-agent.md").read_text(encoding="utf-8")
+    before = snapshot()
+    ws = build_workspace(SCRIPT_DIR / "01-clear-approve", subagent_model="sonnet")
+    try:
+        ws_ok = (
+            (ws / ".claude" / "commands" / f"{HARNESS_COMMAND}.md").is_file()
+            and not (ws / ".claude" / "commands" / "council.md").exists()
+            and (ws / ".claude" / "hooks" / "jurisdiction_gate.py").is_file()
+            and (ws / ".claude" / "settings.json").is_file()
+            and any((ws / "context" / "finance").iterdir())
+            and "model: sonnet" in (ws / ".claude" / "agents" / "cfo-agent.md").read_text(encoding="utf-8")
+            and snapshot() == before
+            and (CLAUDE_DIR / "agents" / "cfo-agent.md").read_text(encoding="utf-8") == agent_text_before
+        )
+        empty_ws = build_workspace(SCRIPT_DIR / "03-no-context")
+        try:
+            ws_ok = ws_ok and all(not any((empty_ws / "context" / role).iterdir()) for role in ROLE_TO_AGENT)
+        finally:
+            remove_workspace(empty_ws)
+    finally:
+        remove_workspace(ws)
+    if ws_ok and not ws.exists():
+        print("  PASS")
+    else:
+        print(f"  FAIL (workspace={ws}, exists after cleanup={ws.exists()})")
+        ok = False
+
+    print("Self-test 17: Wilson intervals, per-check tallies (n/a excluded, CLI failures counted as failures), "
+          "and model-ID extraction...")
+    lo, hi = wilson_interval(9, 9)
+    lo3, _ = wilson_interval(3, 3)
+    runs = [
+        {"checks": {"d_final_decision_expected": True, "e_regulatory_consulted_expected": None}},
+        {"checks": {"d_final_decision_expected": False, "e_regulatory_consulted_expected": True}},
+        {"checks": {}},  # CLI invocation failed
+    ]
+    tallies = check_tallies(runs)
+    meta = extract_run_metadata(build_nested_regulatory_call_transcript())
+    stats_ok = (
+        0.69 < lo < 0.71 and hi == 1.0 and 0.43 < lo3 < 0.45
+        and tallies["d_final_decision_expected"] == (1, 3)
+        and tallies["e_regulatory_consulted_expected"] == (1, 2)
+        and meta["ceo_models"] == ["claude-opus-test"]
+        and meta["subagent_models"] == {"general-purpose": ["claude-haiku-test"]}
+    )
+    if stats_ok:
+        print("  PASS (9/9 -> 95% CI lower bound ~70%; 3/3 -> ~44%)")
+    else:
+        print(f"  FAIL: wilson(9,9)={(lo, hi)} wilson(3,3) lo={lo3} tallies={tallies} meta={meta}")
+        ok = False
+
+    print("Self-test 18: a positive-path example on a machine without the saudi-law-tracker CLI reports "
+          "check (e) as n/a, not as a failure...")
+    task_calls, final_text = parse_transcript(build_good_transcript())
+    na_result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["approve"],
+                             "expected_regulatory_context_consulted": True}, raw_stdout=build_good_transcript(),
+                             regulatory_tool_available=False)
+    if na_result["checks"]["e_regulatory_consulted_expected"] is None and na_result["all_pass"]:
+        print("  PASS")
+    else:
+        print(f"  FAIL: {na_result}")
+        ok = False
+
+    print("Self-test 19: a CLI-level error result (the real session-limit message) is detected and kept out "
+          "of the check tallies...")
+    limit_raw = "\n".join([
+        _fixture_line({"type": "assistant", "message": {"model": "<synthetic>", "content": [
+            {"type": "text", "text": "You've hit your session limit"}]}}),
+        _fixture_line({"type": "result", "is_error": True, "result": "You've hit your session limit"}),
+    ])
+    infra_runs = [{"infra_error": True, "checks": {}}, {"checks": {"d_final_decision_expected": True}}]
+    if (
+        cli_error_result(limit_raw)
+        and cli_error_result(build_good_transcript()) is None
+        and check_tallies(infra_runs)["d_final_decision_expected"] == (1, 1)
+    ):
+        print("  PASS")
+    else:
+        print("  FAIL")
+        ok = False
+
     return ok
 
 
@@ -1686,11 +2273,35 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--example", action="append", help="Only run this example (by folder name). Can repeat. Default: all.")
     parser.add_argument("--runs", type=int, default=3, help="Number of runs per example (default: 3).")
+    parser.add_argument("--jobs", type=int, default=1, help="Council runs to execute in parallel (default: 1). Each run has its own workspace.")
     parser.add_argument("--claude-bin", default="claude", help="Path to the claude CLI (default: 'claude' on PATH).")
     parser.add_argument("--timeout", type=int, default=900, help="Per-run timeout in seconds (default: 900).")
-    parser.add_argument("--no-skip-permissions", action="store_true", help="Do not pass --dangerously-skip-permissions to the CLI (will hang on any permission prompt in a non-interactive run).")
-    parser.add_argument("--log-dir", default=None, help="Directory to write raw transcripts to (default: examples/.results/<timestamp>/).")
-    parser.add_argument("--self-test", action="store_true", help="Run the built-in fixture self-test and exit (no CLI invocation, no context staging).")
+    parser.add_argument(
+        "--no-preapprove",
+        dest="preapprove",
+        action="store_false",
+        help="Do not pre-approve the council's tools with --allowedTools. Tool calls may then be refused or prompted "
+        "for in a headless run. This never passes --dangerously-skip-permissions, and the jurisdiction gate is "
+        "applied either way.",
+    )
+    # Old name for --no-preapprove. Its help text used to claim it controlled
+    # --dangerously-skip-permissions, which this script never passes.
+    parser.add_argument("--no-skip-permissions", dest="preapprove", action="store_false", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--no-cli-gate",
+        dest="cli_gate",
+        action="store_false",
+        help="Do not restrict tools at the CLI level (--tools/--disallowedTools). The project's jurisdiction-gate "
+        "hook is then the only enforcement, as in an interactive /council run. Use this to test the hook.",
+    )
+    parser.add_argument(
+        "--subagent-model",
+        default=None,
+        help="Override the model: line of every *-agent.md in the run's workspace copy (e.g. haiku, sonnet). "
+        "The repo's own agent files are not modified.",
+    )
+    parser.add_argument("--log-dir", default=None, help="Directory to write raw transcripts to (default: examples/.results/<UTC timestamp>/).")
+    parser.add_argument("--self-test", action="store_true", help="Run the built-in fixture self-test and exit (no CLI invocation).")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -1714,36 +2325,31 @@ def main(argv=None):
     # with FileNotFoundError even though the bare name works interactively).
     # shutil.which applies the same PATHEXT resolution a shell would.
     args.claude_bin = shutil.which(args.claude_bin) or args.claude_bin
+    args.regulatory_tool_available = resolve_regulatory_tool() is not None
 
-    log_dir = Path(args.log_dir) if args.log_dir else SCRIPT_DIR / ".results" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
+    log_dir = Path(args.log_dir) if args.log_dir else SCRIPT_DIR / ".results" / stamp
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Staging context/ from: {CONTEXT_ROOT}")
-    print("Backing up current context/ before making any changes...")
-    backup_dir = backup_context()
-
-    all_results = []
-    try:
-        for example_dir in examples:
-            print(f"\nRunning {example_dir.name} x{args.runs}...")
-            result = run_example(
-                example_dir,
-                runs=args.runs,
-                claude_bin=args.claude_bin,
-                skip_permissions=not args.no_skip_permissions,
-                timeout=args.timeout,
-                log_dir=log_dir,
-            )
-            all_results.append(result)
-    finally:
-        print("\nRestoring original context/ contents...")
-        restore_context(backup_dir)
+    settings = {
+        "runs": args.runs,
+        "jobs": args.jobs,
+        "cli_gate": args.cli_gate,
+        "preapprove": args.preapprove,
+        "subagent_model": args.subagent_model,
+        "regulatory_tool_available": args.regulatory_tool_available,
+        "harness_command": f"/{HARNESS_COMMAND}",
+    }
+    if not args.regulatory_tool_available:
+        print("note: saudi-law-tracker CLI not found; check (e) is n/a for examples that need it.")
+    print(f"Running {len(examples)} example(s) x{args.runs} in isolated workspaces (jobs={args.jobs})...")
+    all_results = run_all(examples, args.runs, args, log_dir, args.jobs)
 
     print(f"\nRaw transcripts written to: {log_dir}\n")
-    ok = print_report(all_results)
+    ok = print_report(all_results, settings)
 
     report_path = log_dir / "summary.json"
-    report_path.write_text(json.dumps(all_results, indent=2), encoding="utf-8")
+    report_path.write_text(json.dumps({"settings": settings, "examples": all_results}, indent=2), encoding="utf-8")
     print(f"Full results written to: {report_path}")
 
     sys.exit(0 if ok else 1)
