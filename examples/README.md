@@ -93,9 +93,10 @@ after that filter, treat it as a real regression.
 
 **Live vs. offline:** a live run makes real model calls (each council run is
 the CEO step plus five or seven subagent calls), so it costs real usage.
-`--self-test` needs neither the CLI nor any model: its 19 tests cover
+`--self-test` needs neither the CLI nor any model: its 20 tests cover
 transcript parsing, checks (a)–(e) including several failure modes first
-seen in live runs, the jurisdiction rule, the hook run as a real subprocess,
+seen in live runs, the jurisdiction rule, the hook run as a real subprocess
+(directly and through `run_gate.sh`, including a machine with only `python3`),
 the CLI flags, workspace isolation and the report statistics. CI runs it on
 every push.
 

@@ -67,6 +67,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 CLAUDE_DIR = REPO_ROOT / ".claude"
 GATE_PATH = CLAUDE_DIR / "hooks" / "jurisdiction_gate.py"
+# What .claude/settings.json actually runs: picks python3 / python / py -3.
+LAUNCHER_PATH = CLAUDE_DIR / "hooks" / "run_gate.sh"
 # The name the command is copied under in each throwaway workspace (see the
 # module docstring for why it isn't simply /council).
 HARNESS_COMMAND = "council-under-test"
@@ -2261,7 +2263,92 @@ def self_test() -> bool:
         print("  FAIL")
         ok = False
 
+    ok = _self_test_launcher() and ok
     return ok
+
+
+def _run_launcher(launcher: Path, payload: dict, env: dict, *args: str) -> subprocess.CompletedProcess:
+    """Runs the hook the way .claude/settings.json does: `sh run_gate.sh [args]`."""
+    return subprocess.run(
+        [shutil.which("sh") or "sh", str(launcher), *args],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=60,
+        check=False,
+    )
+
+
+def _self_test_launcher() -> bool:
+    print("Self-test 20: the hook launcher (run_gate.sh) finds Python as python3 alone, denies through it, and "
+          "fails closed for PreToolUse when no Python runs or the gate crashes...")
+    if not shutil.which("sh"):
+        if os.environ.get("CI"):
+            print("  FAIL: no `sh` on PATH (Claude Code runs hook commands with it)")
+            return False
+        print("  SKIP: no `sh` on PATH")
+        return True
+    settings = json.loads((CLAUDE_DIR / "settings.json").read_text(encoding="utf-8"))
+    commands = {event: [h["command"] for g in groups for h in g["hooks"]] for event, groups in settings["hooks"].items()}
+    cases = [(
+        "settings.json runs every hook through run_gate.sh; only PreToolUse fails closed",
+        all("run_gate.sh" in c for cs in commands.values() for c in cs)
+        and all(c.endswith("--fail-closed") for c in commands["PreToolUse"])
+        and not any("--fail-closed" in c for e, cs in commands.items() if e != "PreToolUse" for c in cs),
+        True,
+    )]
+    query = "saudi-law-tracker query --sector labor --json"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        # A PATH whose only Python is a `python3` (common on macOS/Linux), and one with no Python at all.
+        only_py3 = tmp_path / "only-python3"
+        only_py3.mkdir()
+        wrapper = only_py3 / "python3"
+        exe = Path(sys.executable).as_posix()
+        wrapper.write_text(f'#!/bin/sh\nexec "{exe}" "$@"\n', encoding="utf-8", newline="\n")
+        wrapper.chmod(0o755)
+        no_python = tmp_path / "no-python"
+        no_python.mkdir()
+        base_env = {**os.environ, "COUNCIL_GATE_STATE_DIR": str(state_dir),
+                    "COUNCIL_GATE_AUDIT_LOG": str(tmp_path / "audit.jsonl")}
+
+        def event(name, sid, **extra):
+            return {"hook_event_name": name, "session_id": sid, **extra}
+
+        def pretool(sid, command):
+            return event("PreToolUse", sid, tool_name="Bash", tool_input={"command": command})
+
+        for label, path in (("default PATH", os.environ.get("PATH", "")), ("python3-only PATH", str(only_py3))):
+            env = {**base_env, "PATH": path}
+            sid = f"launcher-{label.split()[0]}"
+            _run_launcher(LAUNCHER_PATH, event("UserPromptSubmit", sid, prompt="/council jurisdiction: EU\n\nX?"), env)
+            proc = _run_launcher(LAUNCHER_PATH, pretool(sid, query), env, "--fail-closed")
+            denied = proc.returncode == 0 and _hook_denied(json.loads(proc.stdout) if proc.stdout.strip() else None)
+            cases.append((f"{label}: non-Saudi council query denied via run_gate.sh", denied, True))
+
+        env = {**base_env, "PATH": str(no_python)}
+        proc = _run_launcher(LAUNCHER_PATH, pretool("launcher-none", "ls"), env, "--fail-closed")
+        cases.append(("no Python: PreToolUse blocked (exit 2)", proc.returncode, 2))
+        proc = _run_launcher(LAUNCHER_PATH, event("UserPromptSubmit", "launcher-none", prompt="hi"), env)
+        cases.append(("no Python: UserPromptSubmit only warns (exit 0)", proc.returncode, 0))
+
+        crashing = tmp_path / "crashing"
+        crashing.mkdir()
+        shutil.copy(LAUNCHER_PATH, crashing / "run_gate.sh")
+        (crashing / "jurisdiction_gate.py").write_text("raise SystemExit(1)\n", encoding="utf-8")
+        proc = _run_launcher(crashing / "run_gate.sh", pretool("launcher-crash", "ls"), base_env, "--fail-closed")
+        cases.append(("gate crash: PreToolUse blocked (exit 2)", proc.returncode, 2))
+
+    failed = [(label, got, want) for label, got, want in cases if got != want]
+    for label, got, want in failed:
+        print(f"  FAIL: {label}: got {got}, expected {want}")
+    if not failed:
+        print(f"  PASS ({len(cases)} launcher cases)")
+    return not failed
 
 
 # --------------------------------------------------------------------------

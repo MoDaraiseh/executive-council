@@ -64,13 +64,13 @@ If the command is missing or fails, the council is instructed to carry on, say p
 
 ### Jurisdiction gate (enforced in code)
 
-The rule "never run the regulatory query for a non-Saudi decision" is not left to the model. [.claude/settings.json](.claude/settings.json) registers [.claude/hooks/jurisdiction_gate.py](.claude/hooks/jurisdiction_gate.py) as a Claude Code hook, so it applies to every `/council` run in this project, interactive or headless:
+The rule "never run the regulatory query for a non-Saudi decision" is not left to the model. [.claude/settings.json](.claude/settings.json) registers [.claude/hooks/jurisdiction_gate.py](.claude/hooks/jurisdiction_gate.py) as a Claude Code hook, started by [run_gate.sh](.claude/hooks/run_gate.sh), so it applies to every `/council` run in this project, interactive or headless:
 
 - When a prompt starts with `/council`, the hook reads the `jurisdiction:` field itself, using the rule above.
 - For the rest of that `/council` run, every Bash and PowerShell call is denied unless the jurisdiction is Saudi **and** the command is the saudi-law-tracker query. Hooks also see tool calls made inside subagents, so handing the command to a subagent doesn't get around it.
 - Outside a `/council` run, a saudi-law-tracker command is denied too; other shell commands are unaffected.
 
-The hook needs `python` (3.9+) on `PATH`. If it can't start, Claude Code treats that as a non-blocking hook error and the tool call goes ahead, so check that `python` resolves. The validation harness doesn't depend on the hook alone: it also removes the shell tools at the CLI level (`--tools`, `--disallowedTools Bash,PowerShell`), and `--no-cli-gate` turns that off to test the hook by itself.
+The hook needs Python 3.9+ and `sh` (on Windows, the Git Bash that Claude Code already requires). `run_gate.sh` uses whichever of `python3`, `python` or `py -3` actually runs. If none does, or the gate itself fails, it blocks the shell call (exit 2) instead of letting it through. Without the launcher, a hook that can't start is a non-blocking error in Claude Code and the call would go ahead. The cost is that, with no working Python, every Bash and PowerShell call in this project is blocked until Python is fixed. The validation harness doesn't depend on the hook alone: it also removes the shell tools at the CLI level (`--tools`, `--disallowedTools Bash,PowerShell`), and `--no-cli-gate` turns that off to test the hook by itself.
 
 ### A user-level `council.md` overrides this one
 
