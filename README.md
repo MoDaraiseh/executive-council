@@ -4,6 +4,14 @@ A Claude Code project that runs a business decision through a simulated executiv
 
 This is a decision-support tool, not a decision-maker. See [Human review](#human-review) below.
 
+## Results at a glance
+
+- **Jurisdiction gate:** in 19/19 live runs across 4 scenarios, the regulatory query ran only when it should. The 14 non-Saudi runs never ran it; the 5 Saudi runs did.
+- **All checks:** 18/19 live runs passed every check (95% interval 75–99%). The one failure was a subagent replying in prose instead of JSON.
+- **Offline:** 20 self-tests of the harness and the hook run in CI on every push, on Ubuntu and Windows.
+
+Sample sizes, model versions and limits: [examples/VALIDATION_REPORT.md](examples/VALIDATION_REPORT.md).
+
 ## How to invoke it
 
 From within Claude Code, in this repo:
@@ -72,14 +80,6 @@ The rule "never run the regulatory query for a non-Saudi decision" is not left t
 
 The hook needs Python 3.9+ and `sh` (on Windows, the Git Bash that Claude Code already requires). `run_gate.sh` uses whichever of `python3`, `python` or `py -3` actually runs. If none does, or the gate itself fails, it blocks the shell call (exit 2) instead of letting it through. Without the launcher, a hook that can't start is a non-blocking error in Claude Code and the call would go ahead. The cost is that, with no working Python, every Bash and PowerShell call in this project is blocked until Python is fixed. The validation harness doesn't depend on the hook alone: it also removes the shell tools at the CLI level (`--tools`, `--disallowedTools Bash,PowerShell`), and `--no-cli-gate` turns that off to test the hook by itself.
 
-### A user-level `council.md` overrides this one
-
-If you also have `~/.claude/commands/council.md`, Claude Code runs **that** file when you type `/council`, not this repo's copy (confirmed with Claude Code 2.1.270). Project agents do win over `~/.claude/agents/` copies of the same name, but the command doesn't. Delete or update any personal copy so `/council` runs the version in this repo. `examples/validate.py` avoids the problem by running a copy of the command under a different name.
-
-### The CEO model can fall back to your session model
-
-The command's `model: opus` applies to the turn that runs `/council`. If subagent results arrive asynchronously, the CEO's later turns, including the final synthesis, can run on your session's default model instead. This was seen in 1 of 31 harness runs on 2026-11-14. Select Opus for the session when running `/council`; the harness passes `--model opus` for the same reason.
-
 ## Decision logic
 
 The CEO synthesis step doesn't just average the five recommendations. Two rules take priority over majority vote:
@@ -120,6 +120,57 @@ Each of the CFO, CTO, and CHRO agents also carries a short **Local context** sec
 - a `jurisdiction: KSA` hiring plan, the one case where the regulatory query must actually run.
 
 The harness runs each decision through the real agents, command and hook in a throwaway workspace and checks the output against fixed schemas. `python examples/validate.py --self-test` checks the harness itself offline, and CI runs it on every push. See [examples/README.md](examples/README.md) for details, and [examples/VALIDATION_REPORT.md](examples/VALIDATION_REPORT.md) for live results, sample sizes and known limits.
+
+## Example output
+
+The final verdict from a real run of [the compliance red-flag example](examples/02-compliance-red-flag/) on 2026-11-14 (run 1, transcript `4e40ccc193e4` in the [validation report](examples/VALIDATION_REPORT.md)). A marketing send to a 2019 EU contact list with no consent records is rejected, even though the CFO's own figures show $410,000 of upside:
+
+<details>
+<summary>Final verdict JSON</summary>
+
+```json
+{
+  "final_decision": "reject",
+  "confidence": "high",
+  "regulatory_context_consulted": false,
+  "council_summary": {
+    "cfo": {
+      "recommendation": "reject",
+      "confidence": "high"
+    },
+    "coo": {
+      "recommendation": "reject",
+      "confidence": "high"
+    },
+    "cmo": {
+      "recommendation": "reject",
+      "confidence": "high"
+    },
+    "cto": {
+      "recommendation": "reject",
+      "confidence": "high"
+    },
+    "chro": {
+      "recommendation": "reject",
+      "confidence": "high"
+    }
+  },
+  "key_disagreements": [],
+  "reasoning": "The jurisdiction field was read mechanically and literally as `EU`, which is not a recognized Saudi-jurisdiction value, so this decision is not regulatory-tagged under this council's two-part test and no saudi-law-tracker query was run — the GDPR exposure the council raises is real, but it is not Saudi regulatory subject matter and the council's only regulatory tool is Saudi-specific, so no sourced regulatory rows were available or cited here. All five C-suite agents returned `reject` at high confidence; there was no dissent to record and none has been softened or omitted. The inputs converge on a single binding constraint rather than a balance of risk: the General Counsel memo in `context/people/legal-memo.md` states that the 2019 EU list predates the current consent-tracking system, cannot be verified as GDPR-compliant for marketing use, must not be used without per-contact consent re-confirmation, and is explicitly characterized as \"a blocker, not a risk to be weighed against upside,\" with \"no exceptions for revenue timing pressure.\" The CTO adds an independent and arguably more decisive finding: consent-tracking fields were not added to the CRM until 2021, so there is no per-contact consent record for these 280,000 contacts and the system cannot suppress non-consented recipients at send time — meaning this is not a process delay that urgency can compress, but a missing technical capability with no retroactive fix. The CFO was the only agent to quantify an upside ($410,000 incremental revenue at near-zero marginal send cost) and still rejected, because that figure sits against a GDPR Article 83 ceiling of 4% of global annual revenue; under this council's decision logic a compliance/legal objection acts as a near-veto and is not overridden by financial or market upside, and here the financial lens itself reached the same conclusion. The COO confirmed the send is technically trivial and marketing ops has bandwidth, which isolates the blocker as purely legal/data-compliance rather than capacity. The CMO noted genuine offsetting market factors — strong historical list performance, two competitors running concurrent promotions, on-brand creative — but flagged that the market brief's favorable read was explicitly conditioned on \"assuming the list is clear to use,\" which it is not, and that in EU markets a consent violation becoming public inverts the brand's privacy positioning. The CHRO added culture and personal-liability dimensions: approving this would signal that revenue targets override standing counsel instructions, and staff executing a knowingly non-compliant send carry their own exposure. No agent returned `insufficient_data`, and the figures needed for the call were present in context, so no further information is required before finalizing. Consistent with this council's scope, the compliance flags above are a routing signal, not a legal opinion — the proposal as written should be declined and any urgent request to accelerate re-permissioning routed to Legal directly per the standing memo, with quarter-end revenue pursued through initiatives that do not depend on this list; a compliant alternative worth putting to Legal and Marketing is a send restricted to contacts acquired after the 2021 consent-tracking rollout, whose consent status the CRM can actually verify and suppress against, paired with a separate re-permissioning campaign for the 2019 cohort on a timeline Legal sets rather than one quarter-end dictates. Because this decision is a rejection rather than an approval, the standing human-review reminder is not triggered as an approval condition, but this synthesis should still be reviewed by a human — and specifically by counsel — before any related campaign proceeds."
+}
+```
+
+</details>
+
+## Known issues
+
+### A user-level `council.md` overrides this one
+
+If you also have `~/.claude/commands/council.md`, Claude Code runs **that** file when you type `/council`, not this repo's copy (confirmed with Claude Code 2.1.270). Project agents do win over `~/.claude/agents/` copies of the same name, but the command doesn't. Delete or update any personal copy so `/council` runs the version in this repo. `examples/validate.py` avoids the problem by running a copy of the command under a different name.
+
+### The CEO model can fall back to your session model
+
+The command's `model: opus` applies to the turn that runs `/council`. If subagent results arrive asynchronously, the CEO's later turns, including the final synthesis, can run on your session's default model instead. This was seen in 1 of 31 harness runs on 2026-11-14. Select Opus for the session when running `/council`; the harness passes `--model opus` for the same reason.
 
 ## Subagent model: haiku
 
