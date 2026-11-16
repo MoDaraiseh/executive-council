@@ -1,5 +1,7 @@
 # executive-council
 
+[![ci](https://github.com/MoDaraiseh/executive-council/actions/workflows/ci.yml/badge.svg)](https://github.com/MoDaraiseh/executive-council/actions/workflows/ci.yml)
+
 A Claude Code project that runs a business decision through a simulated executive council — CFO, COO, CMO, CTO, and CHRO — before committing to a final call. Each C-suite role is an independent subagent that reads only its own domain's supporting documents and returns a structured recommendation; a CEO synthesis step then combines all five into one accountable decision, with an explicit rule that a real compliance/legal/security objection can't be steamrolled by a strong financial or market case.
 
 This is a decision-support tool, not a decision-maker. See [Human review](#human-review) below.
