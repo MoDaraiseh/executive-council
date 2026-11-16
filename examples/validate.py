@@ -326,9 +326,8 @@ def _is_placeholder_launch_artifact(tc: dict) -> bool:
     looking text, don't widen this filter to cover it without re-verifying
     live first -- that shape could be a genuine new problem, not this one.
     """
-    return (
-        tc.get("result_text") is None
-        and (tc.get("description") == "placeholder" or tc.get("prompt") == "placeholder")
+    return tc.get("result_text") is None and (
+        tc.get("description") == "placeholder" or tc.get("prompt") == "placeholder"
     )
 
 
@@ -426,9 +425,8 @@ def parse_transcript(raw_stdout: str):
                         continue  # launch ack, not the real verdict -- leave result_text None for now
                     tc["result_text"] = c
 
-        elif obj_type == "result":
-            if isinstance(obj.get("result"), str):
-                fallback_result_text = obj["result"]
+        elif obj_type == "result" and isinstance(obj.get("result"), str):
+            fallback_result_text = obj["result"]
 
     if final_text is None:
         final_text = fallback_result_text
@@ -940,15 +938,12 @@ def evaluate_run(
     counts = Counter(called_agents)
     all_roles_present = EXPECTED_AGENTS.issubset(counts) and not (set(counts) - EXPECTED_AGENTS)
     repeats_ok = all(
-        count == 1 or (agent in REGULATORY_FOLLOWUP_AGENTS and count == 2)
-        for agent, count in counts.items()
+        count == 1 or (agent in REGULATORY_FOLLOWUP_AGENTS and count == 2) for agent, count in counts.items()
     )
     result["checks"]["a_five_invocations"] = all_roles_present
     result["checks"]["a_five_distinct_roles"] = repeats_ok
     if not all_roles_present:
-        result["errors"].append(
-            f"expected one invocation of each of {sorted(EXPECTED_AGENTS)}, got {called_agents}"
-        )
+        result["errors"].append(f"expected one invocation of each of {sorted(EXPECTED_AGENTS)}, got {called_agents}")
     elif not repeats_ok:
         result["errors"].append(
             f"unexpected repeat invocation pattern {dict(counts)}: only cto-agent/chro-agent may "
@@ -970,7 +965,7 @@ def evaluate_run(
             subagent_ok = False
             per_agent_schema_errors[key] = [f"invalid JSON: {parse_err}"]
             continue
-        expected_role = agent[:-len("-agent")] if agent.endswith("-agent") else None
+        expected_role = agent[: -len("-agent")] if agent.endswith("-agent") else None
         errs = validate_subagent_schema(parsed, expected_role=expected_role)
         if errs:
             subagent_ok = False
@@ -1073,7 +1068,10 @@ def evaluate_run(
     else:
         result["checks"]["e_regulatory_consulted_expected"] = None
 
-    result["all_pass"] = all(v for v in result["checks"].values() if v is not None) and result["checks"]["d_final_decision_expected"] is not False
+    result["all_pass"] = (
+        all(v for v in result["checks"].values() if v is not None)
+        and result["checks"]["d_final_decision_expected"] is not False
+    )
 
     return result
 
@@ -1325,7 +1323,11 @@ def print_report(all_results: list[dict], settings: dict) -> bool:
             f"({summary['agreement_ratio'] * 100:.0f}% agreed on the most common outcome, "
             f"{summary['most_common_decision']!r}); runs fully passing all checks: "
             f"{format_rate(summary['runs_passed'], summary['runs_scored'])}"
-            + (f"; {summary['infra_errors']} run(s) excluded as CLI/infrastructure errors" if summary["infra_errors"] else "")
+            + (
+                f"; {summary['infra_errors']} run(s) excluded as CLI/infrastructure errors"
+                if summary["infra_errors"]
+                else ""
+            )
             + ".\n"
         )
         print(f"Models: {_models_line(ex['runs'])}\n")
@@ -1366,10 +1368,15 @@ def _make_task_use_block(tool_id, subagent_type, description="eval", prompt="...
 
 
 def _make_tool_result(tool_id, text):
-    return {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
+    return {
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": text}]},
+    }
 
 
-def _make_bash_tool_use_block(tool_id, command='"${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector labor --json', name="Bash"):
+def _make_bash_tool_use_block(
+    tool_id, command='"${SAUDI_LAW_TRACKER:-saudi-law-tracker}" query --sector labor --json', name="Bash"
+):
     """Council.md step 5's regulatory query, as it actually appears in a raw
     transcript -- used to give regulatory_bash_query_invoked something real
     to detect in self-test fixtures, rather than only ever testing against
@@ -1385,41 +1392,47 @@ def _make_bash_disabled_error_result(tool_id):
         "type": "user",
         "message": {
             "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": "<tool_use_error>Error: No such tool available: Bash. Bash is disabled for this session, in subagents as well as here.</tool_use_error>",
-                "is_error": True,
-            }],
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": "<tool_use_error>Error: No such tool available: Bash. Bash is disabled for this session, in subagents as well as here.</tool_use_error>",
+                    "is_error": True,
+                }
+            ],
         },
     }
 
 
 def _good_subagent_reply(role: str) -> str:
-    return json.dumps({
-        "role": role,
-        "recommendation": "approve",
-        "confidence": "high",
-        "key_risks": ["none material"],
-        "key_benefits": ["closes gap"],
-    })
+    return json.dumps(
+        {
+            "role": role,
+            "recommendation": "approve",
+            "confidence": "high",
+            "key_risks": ["none material"],
+            "key_benefits": ["closes gap"],
+        }
+    )
 
 
 def build_good_transcript():
-    council_reply = json.dumps({
-        "final_decision": "approve",
-        "confidence": "high",
-        "regulatory_context_consulted": False,
-        "council_summary": {
-            "cfo": {"recommendation": "approve", "confidence": "high"},
-            "coo": {"recommendation": "approve", "confidence": "high"},
-            "cmo": {"recommendation": "approve", "confidence": "high"},
-            "cto": {"recommendation": "approve", "confidence": "high"},
-            "chro": {"recommendation": "approve", "confidence": "high"},
-        },
-        "key_disagreements": [],
-        "reasoning": "all five agents agreed",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "approve",
+            "confidence": "high",
+            "regulatory_context_consulted": False,
+            "council_summary": {
+                "cfo": {"recommendation": "approve", "confidence": "high"},
+                "coo": {"recommendation": "approve", "confidence": "high"},
+                "cmo": {"recommendation": "approve", "confidence": "high"},
+                "cto": {"recommendation": "approve", "confidence": "high"},
+                "chro": {"recommendation": "approve", "confidence": "high"},
+            },
+            "key_disagreements": [],
+            "reasoning": "all five agents agreed",
+        }
+    )
 
     lines = []
     tool_ids = {}
@@ -1432,7 +1445,17 @@ def build_good_transcript():
     for agent, tid in tool_ids.items():
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1446,21 +1469,23 @@ def build_extra_council_field_transcript():
     even though every other check would otherwise pass, proving the extra-
     key check can't silently regress."""
 
-    council_reply = json.dumps({
-        "final_decision": "approve",
-        "confidence": "high",
-        "regulatory_context_consulted": False,
-        "council_summary": {
-            "cfo": {"recommendation": "approve", "confidence": "high"},
-            "coo": {"recommendation": "approve", "confidence": "high"},
-            "cmo": {"recommendation": "approve", "confidence": "high"},
-            "cto": {"recommendation": "approve", "confidence": "high"},
-            "chro": {"recommendation": "approve", "confidence": "high"},
-        },
-        "key_disagreements": [],
-        "reasoning": "all five agents agreed",
-        "human_review_required": "Yes, before acting on this decision.",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "approve",
+            "confidence": "high",
+            "regulatory_context_consulted": False,
+            "council_summary": {
+                "cfo": {"recommendation": "approve", "confidence": "high"},
+                "coo": {"recommendation": "approve", "confidence": "high"},
+                "cmo": {"recommendation": "approve", "confidence": "high"},
+                "cto": {"recommendation": "approve", "confidence": "high"},
+                "chro": {"recommendation": "approve", "confidence": "high"},
+            },
+            "key_disagreements": [],
+            "reasoning": "all five agents agreed",
+            "human_review_required": "Yes, before acting on this decision.",
+        }
+    )
 
     lines = []
     tool_ids = {}
@@ -1473,7 +1498,17 @@ def build_extra_council_field_transcript():
     for agent, tid in tool_ids.items():
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1487,21 +1522,23 @@ def build_unjustified_regulatory_consult_transcript():
     (including (d), since insufficient_data is still reached) would
     otherwise pass -- final_decision alone can't catch this."""
 
-    council_reply = json.dumps({
-        "final_decision": "insufficient_data",
-        "confidence": "high",
-        "regulatory_context_consulted": True,
-        "council_summary": {
-            "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "coo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "cto": {"recommendation": "insufficient_data", "confidence": "high"},
-            "chro": {"recommendation": "insufficient_data", "confidence": "high"},
-        },
-        "key_disagreements": [],
-        "reasoning": "This also plainly touches Saudi regulatory territory (labor law/Nitaqat), "
-                     "so I checked the saudi-law-tracker for relevant sectors.",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "insufficient_data",
+            "confidence": "high",
+            "regulatory_context_consulted": True,
+            "council_summary": {
+                "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "coo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "cto": {"recommendation": "insufficient_data", "confidence": "high"},
+                "chro": {"recommendation": "insufficient_data", "confidence": "high"},
+            },
+            "key_disagreements": [],
+            "reasoning": "This also plainly touches Saudi regulatory territory (labor law/Nitaqat), "
+            "so I checked the saudi-law-tracker for relevant sectors.",
+        }
+    )
 
     lines = []
     tool_ids = {}
@@ -1517,9 +1554,26 @@ def build_unjustified_regulatory_consult_transcript():
     # The actual Bash invocation, not just the self-reported field -- this is
     # what regulatory_bash_query_invoked() must detect for check (e) to fire
     # on the real failure mode rather than only ever on a hand-set boolean.
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]},
+            }
+        )
+    )
     lines.append(_fixture_line(_make_tool_result("toolu_bash1", '{"rows": []}')))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1531,20 +1585,22 @@ def build_self_report_mismatch_transcript():
     reading the transcript directly rather than trusting the self-report.
     Must fail check (e) (self-report alone would have wrongly passed it)."""
 
-    council_reply = json.dumps({
-        "final_decision": "insufficient_data",
-        "confidence": "high",
-        "regulatory_context_consulted": False,
-        "council_summary": {
-            "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "coo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "cto": {"recommendation": "insufficient_data", "confidence": "high"},
-            "chro": {"recommendation": "insufficient_data", "confidence": "high"},
-        },
-        "key_disagreements": [],
-        "reasoning": "No jurisdiction was specified, so no regulatory query was run.",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "insufficient_data",
+            "confidence": "high",
+            "regulatory_context_consulted": False,
+            "council_summary": {
+                "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "coo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "cto": {"recommendation": "insufficient_data", "confidence": "high"},
+                "chro": {"recommendation": "insufficient_data", "confidence": "high"},
+            },
+            "key_disagreements": [],
+            "reasoning": "No jurisdiction was specified, so no regulatory query was run.",
+        }
+    )
 
     lines = []
     tool_ids = {}
@@ -1558,9 +1614,26 @@ def build_self_report_mismatch_transcript():
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
     # The query actually ran, contradicting the self-report above.
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]},
+            }
+        )
+    )
     lines.append(_fixture_line(_make_tool_result("toolu_bash1", '{"rows": []}')))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1576,22 +1649,24 @@ def build_bash_attempted_but_disabled_transcript():
     -- an attempted-but-hard-errored call is not "the regulatory step ran,"
     since nothing it could have returned ever reached any subagent."""
 
-    council_reply = json.dumps({
-        "final_decision": "approve_with_conditions",
-        "confidence": "medium",
-        "regulatory_context_consulted": False,
-        "council_summary": {
-            "cfo": {"recommendation": "approve", "confidence": "high"},
-            "coo": {"recommendation": "approve", "confidence": "high"},
-            "cmo": {"recommendation": "approve", "confidence": "high"},
-            "cto": {"recommendation": "approve", "confidence": "high"},
-            "chro": {"recommendation": "approve_with_conditions", "confidence": "high"},
-        },
-        "key_disagreements": ["CHRO alone flagged operational conditions (roster fragility, fatigue risk)"],
-        "reasoning": "The regulatory Bash step was attempted but the tool was unavailable for this "
-                     "session (jurisdiction: unspecified); proceeded without it and reached this "
-                     "decision on purely operational grounds.",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "approve_with_conditions",
+            "confidence": "medium",
+            "regulatory_context_consulted": False,
+            "council_summary": {
+                "cfo": {"recommendation": "approve", "confidence": "high"},
+                "coo": {"recommendation": "approve", "confidence": "high"},
+                "cmo": {"recommendation": "approve", "confidence": "high"},
+                "cto": {"recommendation": "approve", "confidence": "high"},
+                "chro": {"recommendation": "approve_with_conditions", "confidence": "high"},
+            },
+            "key_disagreements": ["CHRO alone flagged operational conditions (roster fragility, fatigue risk)"],
+            "reasoning": "The regulatory Bash step was attempted but the tool was unavailable for this "
+            "session (jurisdiction: unspecified); proceeded without it and reached this "
+            "decision on purely operational grounds.",
+        }
+    )
 
     lines = []
     tool_ids = {}
@@ -1604,9 +1679,26 @@ def build_bash_attempted_but_disabled_transcript():
     for agent, tid in tool_ids.items():
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash_disabled")]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash_disabled")]},
+            }
+        )
+    )
     lines.append(_fixture_line(_make_bash_disabled_error_result("toolu_bash_disabled")))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1614,19 +1706,23 @@ def build_bash_attempted_but_disabled_transcript():
 def build_broken_transcript():
     """Only 4 subagents called, one reply is malformed JSON, final reply missing a field."""
     bad_subagent_reply = "not json at all"
-    ok_subagent_reply = json.dumps({
-        "recommendation": "reject",
-        "confidence": "high",
-        "key_risks": ["legal"],
-        "key_benefits": [],
-    })
-    council_reply = json.dumps({
-        "final_decision": "reject",
-        "confidence": "high",
-        # missing council_summary on purpose
-        "key_disagreements": [],
-        "reasoning": "broken on purpose",
-    })
+    ok_subagent_reply = json.dumps(
+        {
+            "recommendation": "reject",
+            "confidence": "high",
+            "key_risks": ["legal"],
+            "key_benefits": [],
+        }
+    )
+    council_reply = json.dumps(
+        {
+            "final_decision": "reject",
+            "confidence": "high",
+            # missing council_summary on purpose
+            "key_disagreements": [],
+            "reasoning": "broken on purpose",
+        }
+    )
     lines = []
     tool_ids = {}
     assistant_content = []
@@ -1638,7 +1734,14 @@ def build_broken_transcript():
     for i, tid in enumerate(tool_ids.values()):
         reply = bad_subagent_reply if i == 0 else ok_subagent_reply
         lines.append(_fixture_line(_make_tool_result(tid, reply)))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": council_reply}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": council_reply}]},
+            }
+        )
+    )
     return "\n".join(lines)
 
 
@@ -1650,20 +1753,22 @@ def build_regulatory_followup_transcript():
     2026-09-14) that the pre-fix harness incorrectly failed on checks (a)
     and (b); this fixture proves the fix accepts it."""
 
-    council_reply = json.dumps({
-        "final_decision": "approve_with_conditions",
-        "confidence": "high",
-        "regulatory_context_consulted": True,
-        "council_summary": {
-            "cfo": {"recommendation": "approve", "confidence": "high"},
-            "coo": {"recommendation": "approve", "confidence": "high"},
-            "cmo": {"recommendation": "approve", "confidence": "high"},
-            "cto": {"recommendation": "approve", "confidence": "high"},
-            "chro": {"recommendation": "approve_with_conditions", "confidence": "high"},
-        },
-        "key_disagreements": ["regulatory context changed chro's recommendation"],
-        "reasoning": "regulatory context from saudi-law-tracker changed chro's recommendation",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "approve_with_conditions",
+            "confidence": "high",
+            "regulatory_context_consulted": True,
+            "council_summary": {
+                "cfo": {"recommendation": "approve", "confidence": "high"},
+                "coo": {"recommendation": "approve", "confidence": "high"},
+                "cmo": {"recommendation": "approve", "confidence": "high"},
+                "cto": {"recommendation": "approve", "confidence": "high"},
+                "chro": {"recommendation": "approve_with_conditions", "confidence": "high"},
+            },
+            "key_disagreements": ["regulatory context changed chro's recommendation"],
+            "reasoning": "regulatory context from saudi-law-tracker changed chro's recommendation",
+        }
+    )
 
     lines = []
     tool_ids = {}
@@ -1683,8 +1788,21 @@ def build_regulatory_followup_transcript():
     # cto-agent/chro-agent follow-up -- its results are what gets forwarded
     # to them. Included here so regulatory_bash_query_invoked() has a real
     # invocation to detect for this genuinely regulatory-tagged run.
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]}}))
-    lines.append(_fixture_line(_make_tool_result("toolu_bash1", '{"rows": [{"title": "Labor Law Art. 41", "source_url": "https://example.gov.sa/x"}]}')))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [_make_bash_tool_use_block("toolu_bash1")]},
+            }
+        )
+    )
+    lines.append(
+        _fixture_line(
+            _make_tool_result(
+                "toolu_bash1", '{"rows": [{"title": "Labor Law Art. 41", "source_url": "https://example.gov.sa/x"}]}'
+            )
+        )
+    )
 
     followup_batch = ["cto-agent", "chro-agent"]
     assistant_content2 = []
@@ -1694,17 +1812,29 @@ def build_regulatory_followup_transcript():
         assistant_content2.append(_make_task_use_block(tid, agent))
     lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": assistant_content2}}))
     lines.append(_fixture_line(_make_tool_result(tool_ids[("cto-agent", 2)], _good_subagent_reply("cto"))))
-    chro_followup_reply = json.dumps({
-        "role": "chro",
-        "recommendation": "approve_with_conditions",
-        "confidence": "high",
-        "key_risks": ["needs documentation"],
-        "key_benefits": ["closes gap"],
-        "conditions": ["document non-coercive opt-in", "confirm overtime logging"],
-    })
+    chro_followup_reply = json.dumps(
+        {
+            "role": "chro",
+            "recommendation": "approve_with_conditions",
+            "confidence": "high",
+            "key_risks": ["needs documentation"],
+            "key_benefits": ["closes gap"],
+            "conditions": ["document non-coercive opt-in", "confirm overtime logging"],
+        }
+    )
     lines.append(_fixture_line(_make_tool_result(tool_ids[("chro-agent", 2)], chro_followup_reply)))
 
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1713,20 +1843,22 @@ def build_bad_repeat_transcript():
     """cfo-agent called twice instead of cto-agent/chro-agent -- not a
     legitimate XREF-01 repeat pattern, so this must still fail check (a)."""
 
-    council_reply = json.dumps({
-        "final_decision": "approve",
-        "confidence": "high",
-        "regulatory_context_consulted": False,
-        "council_summary": {
-            "cfo": {"recommendation": "approve", "confidence": "high"},
-            "coo": {"recommendation": "approve", "confidence": "high"},
-            "cmo": {"recommendation": "approve", "confidence": "high"},
-            "cto": {"recommendation": "approve", "confidence": "high"},
-            "chro": {"recommendation": "approve", "confidence": "high"},
-        },
-        "key_disagreements": [],
-        "reasoning": "all five agents agreed",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "approve",
+            "confidence": "high",
+            "regulatory_context_consulted": False,
+            "council_summary": {
+                "cfo": {"recommendation": "approve", "confidence": "high"},
+                "coo": {"recommendation": "approve", "confidence": "high"},
+                "cmo": {"recommendation": "approve", "confidence": "high"},
+                "cto": {"recommendation": "approve", "confidence": "high"},
+                "chro": {"recommendation": "approve", "confidence": "high"},
+            },
+            "key_disagreements": [],
+            "reasoning": "all five agents agreed",
+        }
+    )
 
     lines = []
     agents = ["cfo-agent", "cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]
@@ -1737,7 +1869,17 @@ def build_bad_repeat_transcript():
     for i, agent in enumerate(agents):
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(f"toolu_{i}", _good_subagent_reply(role))))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1748,20 +1890,22 @@ def build_placeholder_artifact_transcript():
     confirmed live 2026-09-14 (03-no-context run 2). Must still pass every
     check once _is_placeholder_launch_artifact filters the phantom out."""
 
-    council_reply = json.dumps({
-        "final_decision": "insufficient_data",
-        "confidence": "high",
-        "regulatory_context_consulted": False,
-        "council_summary": {
-            "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "coo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
-            "cto": {"recommendation": "insufficient_data", "confidence": "high"},
-            "chro": {"recommendation": "insufficient_data", "confidence": "high"},
-        },
-        "key_disagreements": [],
-        "reasoning": "all context folders empty",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "insufficient_data",
+            "confidence": "high",
+            "regulatory_context_consulted": False,
+            "council_summary": {
+                "cfo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "coo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "cmo": {"recommendation": "insufficient_data", "confidence": "high"},
+                "cto": {"recommendation": "insufficient_data", "confidence": "high"},
+                "chro": {"recommendation": "insufficient_data", "confidence": "high"},
+            },
+            "key_disagreements": [],
+            "reasoning": "all context folders empty",
+        }
+    )
 
     lines = []
     tool_ids = {}
@@ -1782,7 +1926,17 @@ def build_placeholder_artifact_transcript():
         lines.append(_fixture_line(_make_tool_result(tool_ids[agent], _good_subagent_reply(role))))
     # (deliberately no tool_result for phantom_id)
 
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply}))
     return "\n".join(lines)
 
@@ -1801,7 +1955,7 @@ def build_raw_control_char_council_reply_transcript():
     # Built by hand, not json.dumps(), which would never reproduce this bug
     # (it always escapes control characters correctly).
     council_reply_with_raw_newline = (
-        '{\n'
+        "{\n"
         '  "final_decision": "reject",\n'
         '  "confidence": "high",\n'
         '  "regulatory_context_consulted": false,\n'
@@ -1811,12 +1965,12 @@ def build_raw_control_char_council_reply_transcript():
         '    "cmo": { "recommendation": "reject", "confidence": "high" },\n'
         '    "cto": { "recommendation": "reject", "confidence": "high" },\n'
         '    "chro": { "recommendation": "reject", "confidence": "high" }\n'
-        '  },\n'
+        "  },\n"
         '  "key_disagreements": [],\n'
         '  "reasoning": "The list must not be used without re-confirmed consent.\n'
-        '\n'
+        "\n"
         'This decision should be reviewed by a human before being acted on."\n'
-        '}'
+        "}"
     )
 
     lines = []
@@ -1830,7 +1984,17 @@ def build_raw_control_char_council_reply_transcript():
     for agent, tid in tool_ids.items():
         role = agent[: -len("-agent")]
         lines.append(_fixture_line(_make_tool_result(tid, _good_subagent_reply(role))))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"```json\n{council_reply_with_raw_newline}\n```"}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"```json\n{council_reply_with_raw_newline}\n```"}],
+                },
+            }
+        )
+    )
     lines.append(_fixture_line({"type": "result", "subtype": "success", "result": council_reply_with_raw_newline}))
     return "\n".join(lines)
 
@@ -1841,27 +2005,55 @@ def build_nested_regulatory_call_transcript():
     succeeds. The CLI streams subagent events with parent_tool_use_id set,
     so check (e) must catch it even though the CEO itself never ran a
     shell command."""
-    council_reply = json.dumps({
-        "final_decision": "insufficient_data",
-        "confidence": "high",
-        "regulatory_context_consulted": False,
-        "council_summary": {r: {"recommendation": "insufficient_data", "confidence": "high"} for r in COUNCIL_SUMMARY_KEYS},
-        "key_disagreements": [],
-        "reasoning": "No jurisdiction was specified.",
-    })
+    council_reply = json.dumps(
+        {
+            "final_decision": "insufficient_data",
+            "confidence": "high",
+            "regulatory_context_consulted": False,
+            "council_summary": {
+                r: {"recommendation": "insufficient_data", "confidence": "high"} for r in COUNCIL_SUMMARY_KEYS
+            },
+            "key_disagreements": [],
+            "reasoning": "No jurisdiction was specified.",
+        }
+    )
     lines = []
-    content = [_make_task_use_block(f"toolu_{a}", a) for a in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]]
+    content = [
+        _make_task_use_block(f"toolu_{a}", a)
+        for a in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]
+    ]
     content.append(_make_task_use_block("toolu_gp", "general-purpose", "run query", "run saudi-law-tracker query"))
     lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "content": content}}))
     for a in ["cfo-agent", "coo-agent", "cmo-agent", "cto-agent", "chro-agent"]:
-        lines.append(_fixture_line(_make_tool_result(f"toolu_{a}", _good_subagent_reply(a[:-len("-agent")]))))
-    nested_call = _make_bash_tool_use_block("toolu_nested", command="saudi-law-tracker query --sector labor --json", name="PowerShell")
-    lines.append(_fixture_line({"type": "assistant", "parent_tool_use_id": "toolu_gp", "message": {"role": "assistant", "model": "claude-haiku-test", "content": [nested_call]}}))
+        lines.append(_fixture_line(_make_tool_result(f"toolu_{a}", _good_subagent_reply(a[: -len("-agent")]))))
+    nested_call = _make_bash_tool_use_block(
+        "toolu_nested", command="saudi-law-tracker query --sector labor --json", name="PowerShell"
+    )
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "parent_tool_use_id": "toolu_gp",
+                "message": {"role": "assistant", "model": "claude-haiku-test", "content": [nested_call]},
+            }
+        )
+    )
     nested_result = _make_tool_result("toolu_nested", '[{"title": "x"}]')
     nested_result["parent_tool_use_id"] = "toolu_gp"
     lines.append(_fixture_line(nested_result))
     lines.append(_fixture_line(_make_tool_result("toolu_gp", "ran it")))
-    lines.append(_fixture_line({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-test", "content": [{"type": "text", "text": council_reply}]}}))
+    lines.append(
+        _fixture_line(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-test",
+                    "content": [{"type": "text", "text": council_reply}],
+                },
+            }
+        )
+    )
     return "\n".join(lines)
 
 
@@ -1904,7 +2096,11 @@ def self_test() -> bool:
     print("Self-test 2: broken transcript should fail (a), (b), and (c)...")
     task_calls, final_text = parse_transcript(build_broken_transcript())
     result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["reject"]})
-    expected_failures = not result["checks"]["a_five_invocations"] and not result["checks"]["b_subagent_schema_valid"] and not result["checks"]["c_council_schema_valid"]
+    expected_failures = (
+        not result["checks"]["a_five_invocations"]
+        and not result["checks"]["b_subagent_schema_valid"]
+        and not result["checks"]["c_council_schema_valid"]
+    )
     if expected_failures and not result["all_pass"]:
         print("  PASS (failures correctly detected)")
     else:
@@ -1914,15 +2110,23 @@ def self_test() -> bool:
     print("Self-test 3: wrong final_decision should fail check (d) only...")
     task_calls, final_text = parse_transcript(build_good_transcript())
     result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["reject"]})
-    if result["checks"]["d_final_decision_expected"] is False and not result["all_pass"] and result["checks"]["a_five_invocations"] and result["checks"]["b_subagent_schema_valid"] and result["checks"]["c_council_schema_valid"]:
+    if (
+        result["checks"]["d_final_decision_expected"] is False
+        and not result["all_pass"]
+        and result["checks"]["a_five_invocations"]
+        and result["checks"]["b_subagent_schema_valid"]
+        and result["checks"]["c_council_schema_valid"]
+    ):
         print("  PASS")
     else:
         print(f"  FAIL: {result}")
         ok = False
 
-    print("Self-test 4: XREF-01 regulatory follow-up (7 calls, cto/chro repeated, "
-          "chro's 2nd reply has 'conditions', a real Bash query invoked) should pass every check "
-          "including (e) on the genuine positive path...")
+    print(
+        "Self-test 4: XREF-01 regulatory follow-up (7 calls, cto/chro repeated, "
+        "chro's 2nd reply has 'conditions', a real Bash query invoked) should pass every check "
+        "including (e) on the genuine positive path..."
+    )
     regulatory_followup_raw = build_regulatory_followup_transcript()
     task_calls, final_text = parse_transcript(regulatory_followup_raw)
     result = evaluate_run(
@@ -1934,8 +2138,10 @@ def self_test() -> bool:
     if result["all_pass"] and result["checks"]["e_regulatory_consulted_expected"] is True:
         print("  PASS")
     else:
-        print(f"  FAIL (harness should accept the legitimate XREF-01 repeat pattern, "
-              f"including a correctly-detected real regulatory consult): {result}")
+        print(
+            f"  FAIL (harness should accept the legitimate XREF-01 repeat pattern, "
+            f"including a correctly-detected real regulatory consult): {result}"
+        )
         ok = False
 
     print("Self-test 5: cfo-agent called twice (not a legitimate repeat) should still fail check (a)...")
@@ -1947,12 +2153,16 @@ def self_test() -> bool:
         print(f"  FAIL (harness should reject a repeat of anyone but cto-agent/chro-agent): {result}")
         ok = False
 
-    print("Self-test 6: phantom 'general-purpose'/'placeholder' launch with no "
-          "result should be filtered out, not counted as a 6th invocation...")
+    print(
+        "Self-test 6: phantom 'general-purpose'/'placeholder' launch with no "
+        "result should be filtered out, not counted as a 6th invocation..."
+    )
     task_calls, final_text = parse_transcript(build_placeholder_artifact_transcript())
     if len(task_calls) != 5:
-        print(f"  FAIL (expected the phantom launch to be filtered, got {len(task_calls)} task_calls): "
-              f"{[tc['subagent_type'] for tc in task_calls]}")
+        print(
+            f"  FAIL (expected the phantom launch to be filtered, got {len(task_calls)} task_calls): "
+            f"{[tc['subagent_type'] for tc in task_calls]}"
+        )
         ok = False
     else:
         result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["insufficient_data"]})
@@ -1962,8 +2172,7 @@ def self_test() -> bool:
             print(f"  FAIL (phantom launch was filtered but the run still failed a check): {result}")
             ok = False
 
-    print("Self-test 7: council JSON with an invented extra field "
-          "(human_review_required) should fail check (c)...")
+    print("Self-test 7: council JSON with an invented extra field (human_review_required) should fail check (c)...")
     task_calls, final_text = parse_transcript(build_extra_council_field_transcript())
     result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["approve"]})
     if result["checks"]["c_council_schema_valid"] is False and not result["all_pass"]:
@@ -1972,9 +2181,11 @@ def self_test() -> bool:
         print(f"  FAIL (harness should reject any council JSON field beyond COUNCIL_SCHEMA_FIELDS): {result}")
         ok = False
 
-    print("Self-test 8: a real Bash regulatory query actually invoked on a "
-          "no-jurisdiction example should fail check (e) even though (a)-(d) all pass, "
-          "detected from the transcript itself (not the self-reported field)...")
+    print(
+        "Self-test 8: a real Bash regulatory query actually invoked on a "
+        "no-jurisdiction example should fail check (e) even though (a)-(d) all pass, "
+        "detected from the transcript itself (not the self-reported field)..."
+    )
     unjustified_raw = build_unjustified_regulatory_consult_transcript()
     task_calls, final_text = parse_transcript(unjustified_raw)
     result = evaluate_run(
@@ -1991,16 +2202,22 @@ def self_test() -> bool:
         and result["checks"]["c_council_schema_valid"]
         and result["checks"]["d_final_decision_expected"]
     ):
-        print("  PASS (unjustified regulatory consult correctly detected, "
-              "despite final_decision itself being the expected insufficient_data)")
+        print(
+            "  PASS (unjustified regulatory consult correctly detected, "
+            "despite final_decision itself being the expected insufficient_data)"
+        )
     else:
-        print(f"  FAIL (harness should catch a jurisdiction-unjustified regulatory consult "
-              f"regardless of final_decision): {result}")
+        print(
+            f"  FAIL (harness should catch a jurisdiction-unjustified regulatory consult "
+            f"regardless of final_decision): {result}"
+        )
         ok = False
 
-    print("Self-test 9: CEO self-reports regulatory_context_consulted: false, but the "
-          "transcript shows the Bash query was actually invoked -- check (e) must catch this "
-          "from the transcript, not trust the self-report...")
+    print(
+        "Self-test 9: CEO self-reports regulatory_context_consulted: false, but the "
+        "transcript shows the Bash query was actually invoked -- check (e) must catch this "
+        "from the transcript, not trust the self-report..."
+    )
     mismatch_raw = build_self_report_mismatch_transcript()
     task_calls, final_text = parse_transcript(mismatch_raw)
     result = evaluate_run(
@@ -2011,16 +2228,19 @@ def self_test() -> bool:
     )
     mismatch_flagged = any("does not match whether the query actually ran" in e for e in result["errors"])
     if result["checks"]["e_regulatory_consulted_expected"] is False and mismatch_flagged:
-        print("  PASS (self-report/transcript mismatch correctly caught -- "
-              "a false self-report alone would have wrongly passed this run)")
+        print(
+            "  PASS (self-report/transcript mismatch correctly caught -- "
+            "a false self-report alone would have wrongly passed this run)"
+        )
     else:
-        print(f"  FAIL (harness must not trust the self-reported field over the actual "
-              f"transcript): {result}")
+        print(f"  FAIL (harness must not trust the self-reported field over the actual transcript): {result}")
         ok = False
 
-    print("Self-test 10: council JSON with a literal, unescaped newline inside the "
-          "reasoning string (not the \\n escape) should still parse and pass check (c) -- "
-          "the exact real 02-compliance-red-flag run 2 failure...")
+    print(
+        "Self-test 10: council JSON with a literal, unescaped newline inside the "
+        "reasoning string (not the \\n escape) should still parse and pass check (c) -- "
+        "the exact real 02-compliance-red-flag run 2 failure..."
+    )
     raw_control_char_raw = build_raw_control_char_council_reply_transcript()
     task_calls, final_text = parse_transcript(raw_control_char_raw)
     result = evaluate_run(
@@ -2032,14 +2252,26 @@ def self_test() -> bool:
     if result["all_pass"] and result["checks"]["c_council_schema_valid"] is True:
         print("  PASS (raw control character inside a JSON string literal repaired and parsed)")
     else:
-        print(f"  FAIL (harness should repair a literal newline inside a JSON string value, "
-              f"not fail the whole run on it): {result}")
+        print(
+            f"  FAIL (harness should repair a literal newline inside a JSON string value, "
+            f"not fail the whole run on it): {result}"
+        )
         ok = False
 
-    print("Self-test 11: jurisdiction: field extraction and the CLI-level gating decision it drives "
-          "(compute_tool_flags) -- pure logic, no CLI...")
-    saudi_flags = {"tools": "Agent,Task,Read,Grep,Glob,Bash", "allowed": "Agent,Task,Read,Grep,Glob,Bash", "disallowed": None}
-    other_flags = {"tools": "Agent,Task,Read,Grep,Glob", "allowed": "Agent,Task,Read,Grep,Glob", "disallowed": "Bash,PowerShell"}
+    print(
+        "Self-test 11: jurisdiction: field extraction and the CLI-level gating decision it drives "
+        "(compute_tool_flags) -- pure logic, no CLI..."
+    )
+    saudi_flags = {
+        "tools": "Agent,Task,Read,Grep,Glob,Bash",
+        "allowed": "Agent,Task,Read,Grep,Glob,Bash",
+        "disallowed": None,
+    }
+    other_flags = {
+        "tools": "Agent,Task,Read,Grep,Glob",
+        "allowed": "Agent,Task,Read,Grep,Glob",
+        "disallowed": "Bash,PowerShell",
+    }
     cases = [
         ("jurisdiction: KSA\n\nProposal: text", "KSA", True),
         ("jurisdiction: Saudi Arabia\n\nProposal: text", "Saudi Arabia", True),
@@ -2066,32 +2298,39 @@ def self_test() -> bool:
         expected_flags = saudi_flags if expected_recognized else other_flags
         if field != expected_field or recognized != expected_recognized or flags != expected_flags:
             jurisdiction_ok = False
-            print(f"  FAIL for {decision_text[:40]!r}: got field={field!r} recognized={recognized} flags={flags}, "
-                  f"expected field={expected_field!r} recognized={expected_recognized} flags={expected_flags}")
+            print(
+                f"  FAIL for {decision_text[:40]!r}: got field={field!r} recognized={recognized} flags={flags}, "
+                f"expected field={expected_field!r} recognized={expected_recognized} flags={expected_flags}"
+            )
     if jurisdiction_ok:
-        print(f"  PASS ({len(cases)} extraction/gating cases: aliases, parentheticals, lists, negations, "
-              "a blank value and a missing field; both shell tools disallowed for non-Saudi values)")
+        print(
+            f"  PASS ({len(cases)} extraction/gating cases: aliases, parentheticals, lists, negations, "
+            "a blank value and a missing field; both shell tools disallowed for non-Saudi values)"
+        )
     else:
         ok = False
 
-    print("Self-test 12: CEO attempts the regulatory Bash call but it hard-errors "
-          "(--disallowedTools \"Bash\" in effect) -- must pass check (e), since no real data "
-          "was ever returned; the exact real 01-clear-approve run 2 scenario...")
+    print(
+        "Self-test 12: CEO attempts the regulatory Bash call but it hard-errors "
+        '(--disallowedTools "Bash" in effect) -- must pass check (e), since no real data '
+        "was ever returned; the exact real 01-clear-approve run 2 scenario..."
+    )
     bash_disabled_raw = build_bash_attempted_but_disabled_transcript()
     task_calls, final_text = parse_transcript(bash_disabled_raw)
     result = evaluate_run(
         task_calls,
         final_text,
-        {"acceptable_final_decisions": ["approve", "approve_with_conditions"], "expected_regulatory_context_consulted": False},
+        {
+            "acceptable_final_decisions": ["approve", "approve_with_conditions"],
+            "expected_regulatory_context_consulted": False,
+        },
         raw_stdout=bash_disabled_raw,
     )
     if result["all_pass"] and result["checks"]["e_regulatory_consulted_expected"] is True:
-        print("  PASS (attempted-but-hard-errored Bash call correctly not counted as the "
-              "regulatory step having run)")
+        print("  PASS (attempted-but-hard-errored Bash call correctly not counted as the regulatory step having run)")
     else:
         print(f"  FAIL (an attempt that returned no real data should not fail check (e)): {result}")
         ok = False
-
 
     print("Self-test 13: jurisdiction-gate hook, run as a real subprocess with real hook payloads...")
     with tempfile.TemporaryDirectory() as state_dir:
@@ -2103,7 +2342,12 @@ def self_test() -> bool:
             return _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": sid, "prompt": text}, env)
 
         def shell(command, tool="Bash", agent_id=None):
-            payload = {"hook_event_name": "PreToolUse", "session_id": sid, "tool_name": tool, "tool_input": {"command": command}}
+            payload = {
+                "hook_event_name": "PreToolUse",
+                "session_id": sid,
+                "tool_name": tool,
+                "tool_input": {"command": command},
+            }
             if agent_id:
                 payload["agent_id"] = agent_id
             return _hook_denied(_run_hook(payload, env))
@@ -2114,7 +2358,9 @@ def self_test() -> bool:
         hook_cases.append(("non-Saudi council: CEO Bash query denied", shell(query), True))
         hook_cases.append(("non-Saudi council: CEO PowerShell query denied", shell(query, tool="PowerShell"), True))
         hook_cases.append(("non-Saudi council: any shell command denied", shell("echo hi"), True))
-        hook_cases.append(("non-Saudi council: query delegated to a subagent denied", shell(query, agent_id="a1"), True))
+        hook_cases.append(
+            ("non-Saudi council: query delegated to a subagent denied", shell(query, agent_id="a1"), True)
+        )
         prompt("<task-notification>\n<task-id>a1</task-id>\n</task-notification>")
         hook_cases.append(("task-notification keeps the council state", shell(query), True))
         prompt("/council-under-test jurisdiction: KSA (Riyadh)\n\nHiring plan?")
@@ -2123,12 +2369,27 @@ def self_test() -> bool:
         prompt("thanks, now list the files")
         hook_cases.append(("after a normal prompt: ordinary shell command allowed", shell("ls"), False))
         hook_cases.append(("outside /council: query denied (fail closed)", shell(query), True))
-        _run_hook({"hook_event_name": "PostToolUse", "session_id": sid, "tool_name": "Bash",
-                   "tool_input": {"command": query}, "tool_response": {"stdout": "[]"}}, env)
+        _run_hook(
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": sid,
+                "tool_name": "Bash",
+                "tool_input": {"command": query},
+                "tool_response": {"stdout": "[]"},
+            },
+            env,
+        )
         audit = read_audit_log(audit_path)
-        hook_cases.append(("PostToolUse of the query is audited", any(a.get("event") == "posttool" for a in audit), True))
-        hook_cases.append(("subagent denial recorded with agent_id",
-                           any(a.get("decision") == "deny" and a.get("agent_id") == "a1" for a in audit), True))
+        hook_cases.append(
+            ("PostToolUse of the query is audited", any(a.get("event") == "posttool" for a in audit), True)
+        )
+        hook_cases.append(
+            (
+                "subagent denial recorded with agent_id",
+                any(a.get("decision") == "deny" and a.get("agent_id") == "a1" for a in audit),
+                True,
+            )
+        )
         _run_hook({"hook_event_name": "SessionEnd", "session_id": sid}, env)
         hook_cases.append(("SessionEnd removes the state file", any(Path(state_dir).glob(f"{sid}.json")), False))
     hook_ok = True
@@ -2141,13 +2402,19 @@ def self_test() -> bool:
     else:
         ok = False
 
-    print("Self-test 14: a regulatory query delegated to a subagent (nested PowerShell call) on a non-Saudi "
-          "example must fail check (e); the audit log alone must also be enough to detect a run...")
+    print(
+        "Self-test 14: a regulatory query delegated to a subagent (nested PowerShell call) on a non-Saudi "
+        "example must fail check (e); the audit log alone must also be enough to detect a run..."
+    )
     nested_raw = build_nested_regulatory_call_transcript()
     task_calls, final_text = parse_transcript(nested_raw)
     task_calls = [tc for tc in task_calls if tc["subagent_type"] in EXPECTED_AGENTS]
-    nested_result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["insufficient_data"],
-                                 "expected_regulatory_context_consulted": False}, raw_stdout=nested_raw)
+    nested_result = evaluate_run(
+        task_calls,
+        final_text,
+        {"acceptable_final_decisions": ["insufficient_data"], "expected_regulatory_context_consulted": False},
+        raw_stdout=nested_raw,
+    )
     audit_only = regulatory_bash_query_invoked(build_good_transcript(), [{"event": "posttool", "regulatory": True}])
     if nested_result["checks"]["e_regulatory_consulted_expected"] is False and audit_only:
         print("  PASS (nested call detected from the transcript; audit-log signal detected on its own)")
@@ -2155,16 +2422,22 @@ def self_test() -> bool:
         print(f"  FAIL: nested={nested_result['checks']} audit_only={audit_only}")
         ok = False
 
-    print("Self-test 15: the jurisdiction gate must not depend on --no-preapprove (it used to be dropped "
-          "with --no-skip-permissions), --no-cli-gate must leave it to the hook, MCP is always stripped...")
+    print(
+        "Self-test 15: the jurisdiction gate must not depend on --no-preapprove (it used to be dropped "
+        "with --no-skip-permissions), --no-cli-gate must leave it to the hook, MCP is always stripped..."
+    )
     non_saudi = "jurisdiction: unspecified\n\nProposal: x"
     no_preapprove = build_command(non_saudi, "claude", preapprove=False, cli_gate=True)
     hook_only = build_command(non_saudi, "claude", preapprove=True, cli_gate=False)
     saudi = build_command("jurisdiction: KSA\n\nProposal: x", "claude", preapprove=True, cli_gate=True)
     cmd_ok = (
-        "--tools" in no_preapprove and "--disallowedTools" in no_preapprove and "--allowedTools" not in no_preapprove
-        and "--tools" not in hook_only and "--disallowedTools" not in hook_only
-        and "Bash" in saudi[saudi.index("--tools") + 1] and "--disallowedTools" not in saudi
+        "--tools" in no_preapprove
+        and "--disallowedTools" in no_preapprove
+        and "--allowedTools" not in no_preapprove
+        and "--tools" not in hook_only
+        and "--disallowedTools" not in hook_only
+        and "Bash" in saudi[saudi.index("--tools") + 1]
+        and "--disallowedTools" not in saudi
         and all("--strict-mcp-config" in c for c in (no_preapprove, hook_only, saudi))
         and command_model() == "opus"
         and "--model" in build_command(non_saudi, "claude", preapprove=True, cli_gate=True, model="opus")
@@ -2175,12 +2448,16 @@ def self_test() -> bool:
         print(f"  FAIL: no_preapprove={no_preapprove} hook_only={hook_only} saudi={saudi}")
         ok = False
 
-    print("Self-test 16: isolated workspace -- fixtures and renamed command land in a temp copy, the repo's own "
-          "context/ is untouched, --subagent-model rewrites only the copy, and cleanup removes it...")
+    print(
+        "Self-test 16: isolated workspace -- fixtures and renamed command land in a temp copy, the repo's own "
+        "context/ is untouched, --subagent-model rewrites only the copy, and cleanup removes it..."
+    )
     repo_context = REPO_ROOT / "context"
 
     def snapshot():
-        return sorted(str(q.relative_to(repo_context)) for q in repo_context.rglob("*")) if repo_context.exists() else []
+        return (
+            sorted(str(q.relative_to(repo_context)) for q in repo_context.rglob("*")) if repo_context.exists() else []
+        )
 
     agent_text_before = (CLAUDE_DIR / "agents" / "cfo-agent.md").read_text(encoding="utf-8")
     before = snapshot()
@@ -2209,8 +2486,10 @@ def self_test() -> bool:
         print(f"  FAIL (workspace={ws}, exists after cleanup={ws.exists()})")
         ok = False
 
-    print("Self-test 17: Wilson intervals, per-check tallies (n/a excluded, CLI failures counted as failures), "
-          "and model-ID extraction...")
+    print(
+        "Self-test 17: Wilson intervals, per-check tallies (n/a excluded, CLI failures counted as failures), "
+        "and model-ID extraction..."
+    )
     lo, hi = wilson_interval(9, 9)
     lo3, _ = wilson_interval(3, 3)
     runs = [
@@ -2221,7 +2500,9 @@ def self_test() -> bool:
     tallies = check_tallies(runs)
     meta = extract_run_metadata(build_nested_regulatory_call_transcript())
     stats_ok = (
-        0.69 < lo < 0.71 and hi == 1.0 and 0.43 < lo3 < 0.45
+        0.69 < lo < 0.71
+        and hi == 1.0
+        and 0.43 < lo3 < 0.45
         and tallies["d_final_decision_expected"] == (1, 3)
         and tallies["e_regulatory_consulted_expected"] == (1, 2)
         and meta["ceo_models"] == ["claude-opus-test"]
@@ -2233,25 +2514,42 @@ def self_test() -> bool:
         print(f"  FAIL: wilson(9,9)={(lo, hi)} wilson(3,3) lo={lo3} tallies={tallies} meta={meta}")
         ok = False
 
-    print("Self-test 18: a positive-path example on a machine without the saudi-law-tracker CLI reports "
-          "check (e) as n/a, not as a failure...")
+    print(
+        "Self-test 18: a positive-path example on a machine without the saudi-law-tracker CLI reports "
+        "check (e) as n/a, not as a failure..."
+    )
     task_calls, final_text = parse_transcript(build_good_transcript())
-    na_result = evaluate_run(task_calls, final_text, {"acceptable_final_decisions": ["approve"],
-                             "expected_regulatory_context_consulted": True}, raw_stdout=build_good_transcript(),
-                             regulatory_tool_available=False)
+    na_result = evaluate_run(
+        task_calls,
+        final_text,
+        {"acceptable_final_decisions": ["approve"], "expected_regulatory_context_consulted": True},
+        raw_stdout=build_good_transcript(),
+        regulatory_tool_available=False,
+    )
     if na_result["checks"]["e_regulatory_consulted_expected"] is None and na_result["all_pass"]:
         print("  PASS")
     else:
         print(f"  FAIL: {na_result}")
         ok = False
 
-    print("Self-test 19: a CLI-level error result (the real session-limit message) is detected and kept out "
-          "of the check tallies...")
-    limit_raw = "\n".join([
-        _fixture_line({"type": "assistant", "message": {"model": "<synthetic>", "content": [
-            {"type": "text", "text": "You've hit your session limit"}]}}),
-        _fixture_line({"type": "result", "is_error": True, "result": "You've hit your session limit"}),
-    ])
+    print(
+        "Self-test 19: a CLI-level error result (the real session-limit message) is detected and kept out "
+        "of the check tallies..."
+    )
+    limit_raw = "\n".join(
+        [
+            _fixture_line(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "model": "<synthetic>",
+                        "content": [{"type": "text", "text": "You've hit your session limit"}],
+                    },
+                }
+            ),
+            _fixture_line({"type": "result", "is_error": True, "result": "You've hit your session limit"}),
+        ]
+    )
     infra_runs = [{"infra_error": True, "checks": {}}, {"checks": {"d_final_decision_expected": True}}]
     if (
         cli_error_result(limit_raw)
@@ -2282,8 +2580,10 @@ def _run_launcher(launcher: Path, payload: dict, env: dict, *args: str) -> subpr
 
 
 def _self_test_launcher() -> bool:
-    print("Self-test 20: the hook launcher (run_gate.sh) finds Python as python3 alone, denies through it, and "
-          "fails closed for PreToolUse when no Python runs or the gate crashes...")
+    print(
+        "Self-test 20: the hook launcher (run_gate.sh) finds Python as python3 alone, denies through it, and "
+        "fails closed for PreToolUse when no Python runs or the gate crashes..."
+    )
     if not shutil.which("sh"):
         if os.environ.get("CI"):
             print("  FAIL: no `sh` on PATH (Claude Code runs hook commands with it)")
@@ -2291,14 +2591,18 @@ def _self_test_launcher() -> bool:
         print("  SKIP: no `sh` on PATH")
         return True
     settings = json.loads((CLAUDE_DIR / "settings.json").read_text(encoding="utf-8"))
-    commands = {event: [h["command"] for g in groups for h in g["hooks"]] for event, groups in settings["hooks"].items()}
-    cases = [(
-        "settings.json runs every hook through run_gate.sh; only PreToolUse fails closed",
-        all("run_gate.sh" in c for cs in commands.values() for c in cs)
-        and all(c.endswith("--fail-closed") for c in commands["PreToolUse"])
-        and not any("--fail-closed" in c for e, cs in commands.items() if e != "PreToolUse" for c in cs),
-        True,
-    )]
+    commands = {
+        event: [h["command"] for g in groups for h in g["hooks"]] for event, groups in settings["hooks"].items()
+    }
+    cases = [
+        (
+            "settings.json runs every hook through run_gate.sh; only PreToolUse fails closed",
+            all("run_gate.sh" in c for cs in commands.values() for c in cs)
+            and all(c.endswith("--fail-closed") for c in commands["PreToolUse"])
+            and not any("--fail-closed" in c for e, cs in commands.items() if e != "PreToolUse" for c in cs),
+            True,
+        )
+    ]
     query = "saudi-law-tracker query --sector labor --json"
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -2313,8 +2617,11 @@ def _self_test_launcher() -> bool:
         wrapper.chmod(0o755)
         no_python = tmp_path / "no-python"
         no_python.mkdir()
-        base_env = {**os.environ, "COUNCIL_GATE_STATE_DIR": str(state_dir),
-                    "COUNCIL_GATE_AUDIT_LOG": str(tmp_path / "audit.jsonl")}
+        base_env = {
+            **os.environ,
+            "COUNCIL_GATE_STATE_DIR": str(state_dir),
+            "COUNCIL_GATE_AUDIT_LOG": str(tmp_path / "audit.jsonl"),
+        }
 
         def event(name, sid, **extra):
             return {"hook_event_name": name, "session_id": sid, **extra}
@@ -2358,9 +2665,16 @@ def _self_test_launcher() -> bool:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--example", action="append", help="Only run this example (by folder name). Can repeat. Default: all.")
+    parser.add_argument(
+        "--example", action="append", help="Only run this example (by folder name). Can repeat. Default: all."
+    )
     parser.add_argument("--runs", type=int, default=3, help="Number of runs per example (default: 3).")
-    parser.add_argument("--jobs", type=int, default=1, help="Council runs to execute in parallel (default: 1). Each run has its own workspace.")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Council runs to execute in parallel (default: 1). Each run has its own workspace.",
+    )
     parser.add_argument("--claude-bin", default="claude", help="Path to the claude CLI (default: 'claude' on PATH).")
     parser.add_argument("--timeout", type=int, default=900, help="Per-run timeout in seconds (default: 900).")
     parser.add_argument(
@@ -2387,8 +2701,14 @@ def main(argv=None):
         help="Override the model: line of every *-agent.md in the run's workspace copy (e.g. haiku, sonnet). "
         "The repo's own agent files are not modified.",
     )
-    parser.add_argument("--log-dir", default=None, help="Directory to write raw transcripts to (default: examples/.results/<UTC timestamp>/).")
-    parser.add_argument("--self-test", action="store_true", help="Run the built-in fixture self-test and exit (no CLI invocation).")
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Directory to write raw transcripts to (default: examples/.results/<UTC timestamp>/).",
+    )
+    parser.add_argument(
+        "--self-test", action="store_true", help="Run the built-in fixture self-test and exit (no CLI invocation)."
+    )
     args = parser.parse_args(argv)
 
     if args.self_test:

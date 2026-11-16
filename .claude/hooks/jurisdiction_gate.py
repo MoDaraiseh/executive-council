@@ -52,14 +52,16 @@ from pathlib import Path
 
 # Matched after normalization (see jurisdiction_segments). Plain "SA" is
 # left out on purpose: it is just as often South Africa.
-SAUDI_ALIASES = frozenset({
-    "ksa",
-    "saudi arabia",
-    "kingdom of saudi arabia",
-    "saudi",
-    "السعودية",
-    "المملكة العربية السعودية",
-})
+SAUDI_ALIASES = frozenset(
+    {
+        "ksa",
+        "saudi arabia",
+        "kingdom of saudi arabia",
+        "saudi",
+        "السعودية",
+        "المملكة العربية السعودية",
+    }
+)
 
 # [ \t]* rather than \s* around the value, so a blank "jurisdiction:" line
 # can't swallow the next line as its value.
@@ -122,7 +124,7 @@ def council_args(prompt: str) -> str | None:
     ~/.claude/commands/council.md can't shadow the repo's copy.
     """
     m = _COUNCIL_PROMPT_RE.match(prompt or "")
-    return prompt[m.end():].lstrip() if m else None
+    return prompt[m.end() :].lstrip() if m else None
 
 
 def is_regulatory_command(command: str) -> bool:
@@ -237,41 +239,49 @@ def handle_pretool(payload: dict) -> None:
     except Exception as e:  # noqa: BLE001 -- fail closed for the regulatory command, open otherwise
         decision = "deny" if is_regulatory_command(command) else None
         reason = f"jurisdiction gate error ({type(e).__name__}: {e}); failing closed for saudi-law-tracker"
-    _audit({
-        "event": "pretool",
-        "session_id": payload.get("session_id"),
-        "agent_id": payload.get("agent_id"),
-        "agent_type": payload.get("agent_type"),
-        "tool_name": payload.get("tool_name"),
-        "command": command,
-        "regulatory": is_regulatory_command(command),
-        "decision": decision or "no_opinion",
-        "reason": reason,
-    })
+    _audit(
+        {
+            "event": "pretool",
+            "session_id": payload.get("session_id"),
+            "agent_id": payload.get("agent_id"),
+            "agent_type": payload.get("agent_type"),
+            "tool_name": payload.get("tool_name"),
+            "command": command,
+            "regulatory": is_regulatory_command(command),
+            "decision": decision or "no_opinion",
+            "reason": reason,
+        }
+    )
     if decision == "deny":
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            },
-        }))
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    },
+                }
+            )
+        )
 
 
 def handle_posttool(payload: dict) -> None:
     command = str((payload.get("tool_input") or {}).get("command") or "")
     if not is_regulatory_command(command):
         return
-    _audit({
-        "event": "posttool",
-        "session_id": payload.get("session_id"),
-        "agent_id": payload.get("agent_id"),
-        "agent_type": payload.get("agent_type"),
-        "tool_name": payload.get("tool_name"),
-        "command": command,
-        "regulatory": True,
-        "tool_response": str(payload.get("tool_response"))[:2000],
-    })
+    _audit(
+        {
+            "event": "posttool",
+            "session_id": payload.get("session_id"),
+            "agent_id": payload.get("agent_id"),
+            "agent_type": payload.get("agent_type"),
+            "tool_name": payload.get("tool_name"),
+            "command": command,
+            "regulatory": True,
+            "tool_response": str(payload.get("tool_response"))[:2000],
+        }
+    )
 
 
 def main() -> int:
